@@ -7,7 +7,7 @@ kernel, set free from the player. Peep is a music player that is just a screen;
 Liberated Peep is what is left when you take the screen away: the part that turns
 an audio file into samples, small enough to drop into any program that can call C.
 
-Version **0.1.0**, built from **Peep 0.2.11**. This repository is called `lib-Peep`.
+Version **0.1.0**, built from **Peep 0.2.11**.
 
 * **5.5 KB of x86-64 assembly** for WAV and FLAC together
 * **No libc, no `malloc`, no threads, no system calls, no global state**
