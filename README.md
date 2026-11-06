@@ -7,9 +7,9 @@ kernel, set free from the player. Peep is a music player that is just a screen;
 Liberated Peep is what is left when you take the screen away: the part that turns
 an audio file into samples, small enough to drop into any program that can call C.
 
-Version **0.1.0**, built from **Peep 0.2.11**. This repository is called `lib-Peep`.
+Version **0.2.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
 
-* **5.5 KB of x86-64 assembly** for WAV and FLAC together
+* **About 6 KB of pure assembly** for WAV and FLAC together, hand-written for both x86-64 and ARM64
 * **No libc, no `malloc`, no threads, no system calls, no global state**
 * **You pull the audio**: call `peep_fill` from your audio callback and get stereo samples
 * **You own the memory**: nothing is allocated behind your back
@@ -36,17 +36,19 @@ peep_seek(&p, frame);  peep_close(&p);
 
 ## Build
 
-You need `nasm` and a linker.
+On x86-64 you need `nasm` and a linker. On ARM64 you need only the GNU assembler (`as`) and a linker.
 
 ```sh
-make            # build/libpeep.a   (peep.o = core + WAV, flac.o = FLAC)
-make win        # Win64 objects (build/peep.obj, build/flac.obj)
+make                                   # build/libpeep.a (x86-64) or build/libpeep_a64.a (on an ARM64 machine)
+make win                               # Win64 objects (build/peep.obj, build/flac.obj)
+make arm64 CROSS=aarch64-linux-gnu-    # cross-build the ARM64 library from an x86-64 machine
 ```
 
 Link `libpeep.a`, `#include "peep.h"`. The two objects are separate in the archive, so a
 program that never mentions `peep_codec_flac` does not link the FLAC code. Or skip
 the build system: assemble `peep.asm` and `flac.asm` yourself
-(`nasm -f elf64 peep.asm`; add `-f win64 -DWIN64` for Windows).
+(`nasm -f elf64 peep.asm`; add `-f win64 -DWIN64` for Windows; on ARM64
+`as -I arm64 arm64/peep.s`).
 
 ## What is in it
 
@@ -55,6 +57,9 @@ the build system: assemble `peep.asm` and `flac.asm` yourself
 | `peep.asm` | 1.3 KB | `peep_open / fill / seek / close`, built-in 16-bit PCM WAV (plain, extensible, odd chunks, unknown length, truncated), volume, channel mapping to stereo |
 | `flac.asm` | 4.2 KB | native FLAC decoder: 4 to 24 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table |
 | `abi.inc` | | System V and Microsoft x64 glue, so one source builds for both |
+| `arm64/peep.s` | 1.4 KB | the same core in AArch64 assembly (NEON for volume) |
+| `arm64/flac.s` | 4.6 KB | the same FLAC decoder in AArch64 assembly (NEON for stereo and output) |
+| `arm64/abi_a64.inc` | | AArch64 glue: calling convention, symbol naming |
 | `peep.h` | | the whole public API |
 | `examples/codec_drflac.c` | | a 20-line codec adapter (wraps `dr_flac`): the model for adding any other format |
 
@@ -67,7 +72,8 @@ NULL-terminated list of them. `examples/codec_drflac.c` shows a complete adapter
 
 ## Speed
 
-Decode only, data already in RAM, same machine, against `dr_flac` (the C decoder Peep used):
+x86-64 only (the ARM64 port has not been timed on real hardware). Decode only, data already in
+RAM, same machine, against `dr_flac` (the C decoder Peep used):
 
 | FLAC file | dr_flac | Liberated Peep | |
 |---|---|---|---|
@@ -81,13 +87,18 @@ Decode only, data already in RAM, same machine, against `dr_flac` (the C decoder
 | 24-bit | 1429x | 1196x | -16% |
 
 WAV decodes at about 140,000x realtime at full volume (it is a copy) and about 80,000x
-with volume applied. Code size: 4.2 KB for FLAC against about 90 KB of `dr_flac`.
+with volume applied. Code size: 4.2 KB for FLAC (4.6 KB on ARM64) against about 90 KB of `dr_flac`.
 
 ## Limits
 
-* **x86-64 only.** ARM needs a separate port. That includes Apple Silicon Macs, iPhones, Android
-  phones and Raspberry Pi. Intel Macs are x86-64 but macOS is untested here, and the build would
-  need `nasm -f macho64` and underscore-prefixed symbol names, which the sources do not have yet.
+* **x86-64 and 64-bit ARM (AArch64) only.** 32-bit ARM is not supported.
+* **The ARM64 port has been run only under QEMU emulation on Linux, never on real ARM hardware,**
+  and its speed has not been measured (emulated timings mean nothing). Correctness is
+  verified; performance on real chips is not.
+* **Apple Silicon Macs, iPhones, Windows on ARM: not verified.** The ARM64 sources have a macOS
+  mode (`as --defsym APPLE=1`: underscore-prefixed symbols, Mach-O sections) but it has never been
+  assembled or run. Intel Macs are untested too and would need `nasm -f macho64` and
+  underscore-prefixed symbol names, which the x86 sources do not have.
 * **FLAC above 24 bits per sample is rejected**, as is a stream whose STREAMINFO block is
   missing or understates the maximum block size.
 * **The FLAC audio CRC-16 is not checked.** Frame headers are CRC-8 checked and a damaged
@@ -112,15 +123,21 @@ with volume applied. Code size: 4.2 KB for FLAC against about 90 KB of `dr_flac`
 * `tools/testwav.py`: 2,505 checks of the WAV path
 * `tools/fuzz.c`: a mutation fuzzer that puts the input and the workspace against unmapped
   guard pages and has a hang watchdog (`make fuzz` runs a long one)
+* `make test-arm64` runs the same suites on the ARM64 build (under QEMU on an x86 machine:
+  `make test-arm64 CROSS=aarch64-linux-gnu-`; needs `qemu-aarch64`)
 * `make build/peepdump.exe` builds the Windows test tool (needs mingw-w64); run it under `wine`
   on the same files and compare with the Linux output
 
-Results at 0.1.0: thousands of random streams and seeks with zero failures; 16 million fuzz
+x86-64 results: thousands of random streams and seeks with zero failures; 16 million fuzz
 inputs (about 32 billion frames decoded) with no crash, hang or out-of-bounds access; clean
 under valgrind; identical output to `dr_flac` on every real ffmpeg-encoded file tried
 (levels 0 to 12, mono, 5.1, 96 kHz, 24-bit); the Windows build passes the same corpus under
 Wine. The decoder was deliberately broken in 39 ways; 35 were caught and the other 4 turned
 out not to change the output.
+
+The ARM64 build, run under QEMU: 2,505 WAV checks and 480+ random FLAC streams with 1,100+ seeks
+with zero failures; output identical to the x86-64 decoder and to `dr_flac` on every real file;
+1.2 million fuzz inputs (2.4 billion frames) with no crash; and 17 of 17 deliberate breakages caught.
 
 ## For AI agents
 

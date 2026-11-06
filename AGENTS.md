@@ -1,6 +1,6 @@
 # AGENTS.md: using Liberated Peep (lib-Peep) in a project
 
-For AI coding agents. Liberated Peep ("Audio for All", version 0.1.0, built from Peep
+For AI coding agents. Liberated Peep ("Audio for All", version 0.2.0, built from Peep
 0.2.11) is a tiny audio-decoding library: you give it the bytes of a WAV or FLAC file and it
 hands back stereo 16-bit samples, on demand. It plays nothing by itself; your program sends
 the samples to a sound device.
@@ -9,15 +9,26 @@ the samples to a sound device.
 
 | Use it when | Do not use it when |
 |---|---|
-| the target is x86-64 (Linux, BSD, Windows) | the target is ARM (Apple Silicon Macs, phones, Raspberry Pi) or any non-x86-64 CPU: there is no port yet |
+| the target is x86-64 (Linux, BSD, Windows) or ARM64 Linux (Raspberry Pi, ARM servers) | the target is 32-bit ARM, RISC-V or any other CPU: there is no port |
 | you need WAV or FLAC and want no dependencies | you need MP3, Ogg Vorbis, AAC or Opus (not included; see "Other formats") |
 | the audio thread must not allocate, lock or call the OS | you need FLAC above 24 bits per sample |
 | you want a very small binary, or are embedding in an unusual runtime | you need resampling, mixing, EQ or effects (this is a decoder only) |
 
 ## Add it to a project
 
-Copy `peep.h`, `peep.asm` and `abi.inc` (and `flac.asm` if you want FLAC). Assemble with
-`nasm` and link the objects:
+Pick the files for your CPU and copy them with `peep.h`. FLAC is optional.
+
+* x86-64: `peep.asm`, `abi.inc`, and `flac.asm` for FLAC. Assemble with `nasm`.
+* ARM64: `arm64/peep.s`, `arm64/abi_a64.inc`, and `arm64/flac.s` for FLAC. Assemble with GNU `as`.
+
+```sh
+# ARM64 (Linux)
+as -I arm64 arm64/peep.s -o peep.o
+as -I arm64 arm64/flac.s -o flac.o               # optional
+cc app.c peep.o flac.o -o app
+```
+
+x86-64:
 
 ```sh
 nasm -f elf64 peep.asm -o peep.o                 # Linux / BSD
@@ -26,7 +37,7 @@ nasm -f win64 -DWIN64 peep.asm -o peep.obj       # Windows (same for flac.asm)
 cc app.c peep.o flac.o -o app
 ```
 
-`make` in this repo does the same and builds `build/libpeep.a`. It is a C ABI, so any
+`make` in this repo does the same and builds `build/libpeep.a` (or `build/libpeep_a64.a` on an ARM64 machine). It is a C ABI, so any
 language that can call C can use it. The library has no dependencies; `third_party/dr_flac.h`
 is only for the example adapter and the tests.
 
@@ -87,8 +98,8 @@ shape for a library whose whole point is to be dropped into anything:
   (`work_need`) and never allocates behind your back.
 * **Real-time safety.** With no allocation, no locks and no system calls, `peep_fill` has
   predictable timing, which is what an audio callback needs.
-* **Size.** The native FLAC decoder is 4.2 KB of code; `dr_flac` is about 90 KB. The whole
-  library, WAV and FLAC together, is 5.5 KB.
+* **Size.** The native FLAC decoder is 4.2 KB of code on x86-64 (4.6 KB on ARM64); `dr_flac` is about
+  90 KB. The whole library, WAV and FLAC together, is 5.5 KB on x86-64 and 6.0 KB on ARM64.
 * **Speed costs nothing.** Native FLAC decodes between 16% slower and 16% faster than
   `dr_flac` depending on the file, roughly 700 to 2,500 times faster than real time. Choosing the
   small decoder does not slow anything audible.
@@ -102,11 +113,11 @@ What each piece is:
 |---|---|---|
 | WAV, 16-bit PCM | `peep.asm` (built in) | Peep's own decoder, carried over unchanged. The simplest format, so the kernel is useful on its own with no codec at all. It reads straight from your memory and applies volume in the same pass. |
 | FLAC | `flac.asm` (`peep_codec_flac`) | The most widely used lossless format, and the one where a freestanding native decoder pays off most: it is where the dependency, memory and size cost of a C decoder is greatest. |
-| `dr_flac` adapter | `examples/codec_drflac.c` | Not part of the library. It is (1) the model for plugging in any other decoder, (2) the reference the native decoder is compared against in the tests, and (3) the fallback for FLAC above 24 bits per sample, which the native decoder rejects. (The core is x86-64 only, so it is not a way to run on other CPUs.) |
+| `dr_flac` adapter | `examples/codec_drflac.c` | Not part of the library. It is (1) the model for plugging in any other decoder, (2) the reference the native decoder is compared against in the tests, and (3) the fallback for FLAC above 24 bits per sample, which the native decoder rejects. (It still needs the core, so it is not a way to run on a CPU the core does not support.) |
 
 ## Other formats (MP3, Vorbis, ...)
 
-Not included in 0.1.0, and there is no adapter for them in this repository. Peep's own repository
+Not included in this release, and there is no adapter for them in this repository. Peep's own repository
 vendors `dr_mp3` and `stb_vorbis`. To use them here, write an adapter in the style of
 `examples/codec_drflac.c` (about 20 lines) and pass it in the `codecs` list. Those C libraries
 allocate memory, so open them off the audio thread. A native MP3 decoder is the likely next step.
@@ -137,10 +148,14 @@ typedef struct peep_codec {
 
 ## If you modify this repository
 
-* The `peep` struct layout is written in **three places that must agree**: `peep.h`, the `P_*`
-  constants at the top of `peep.asm`, and the `P_*` / `S_*` constants at the top of `flac.asm`.
+* The `peep` struct layout is written in **five places that must agree**: `peep.h`, the `P_*`
+  constants at the top of `peep.asm`, the `P_*` / `S_*` constants at the top of `flac.asm`, the
+  `P_*` constants in `arm64/abi_a64.inc`, and the `S_*` constants at the top of `arm64/flac.s`.
   Change one, change all, then run the tests.
-* Run `make test` after every change (needs `python3` with `numpy`). After touching `flac.asm` also
+* The two ports are the same design in two instruction sets. A behaviour change belongs in both, and
+  both must pass the same tests: `make test` (x86-64) and `make test-arm64` (ARM64).
+* Run `make test` after every change (needs `python3` with `numpy`). ARM64 changes: `make test-arm64
+  CROSS=aarch64-linux-gnu-` (needs `qemu-aarch64`; on a real ARM machine leave `CROSS` empty). After touching `flac.asm` also
   run `make fuzz`. Windows changes can be checked under Wine: `make build/peepdump.exe` (needs mingw-w64),
   then run it with `wine` on the same files and compare the output with the Linux build.
 * A decoder is only correct if it matches ground truth. `tools/mkflac.py` is the oracle for FLAC: it
@@ -154,8 +169,11 @@ typedef struct peep_codec {
 
 ## Things to tell the user honestly
 
-* It is x86-64 only. It has not been run on ARM, so it does not work on Apple Silicon Macs, phones or
-  Raspberry Pi. macOS on Intel is untested and would need `-f macho64` and underscore-prefixed symbols.
+* The ARM64 port has only been run under QEMU emulation, never on real ARM hardware, and its speed has
+  not been measured. Correctness is verified; real-world speed is not.
+* Apple Silicon Macs, iPhones and Windows on ARM are not verified. A macOS mode exists in the ARM64
+  sources (`--defsym APPLE=1`) but has never been assembled or run. Intel Macs are untested too.
+* 32-bit ARM is not supported.
 * The Windows build has been tested under Wine, not on real Windows.
 * FLAC audio data is not CRC-16 checked, so a flipped bit inside audio gives a wrong sample.
 * FLAC above 24 bits, MP3 and Vorbis are not handled natively.

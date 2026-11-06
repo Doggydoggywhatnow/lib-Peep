@@ -2,6 +2,41 @@
 
 All notable changes to Liberated Peep.
 
+## 0.2.0
+
+**Built from Peep 0.2.11.** Liberated Peep now runs on 64-bit ARM as well as x86-64.
+
+### Added
+- An ARM64 (AArch64) port, in pure assembly, with the same API, behaviour and features as the
+  x86-64 version: `arm64/peep.s` (1.4 KB, core and built-in WAV), `arm64/flac.s` (4.6 KB, the
+  FLAC decoder) and `arm64/abi_a64.inc`. No C is involved; building the library needs only the
+  GNU assembler and a linker. NEON does the volume scaling, the stereo reconstruction and the
+  output interleaving.
+- `make arm64 CROSS=aarch64-linux-gnu-` to cross-build from an x86-64 machine; on an ARM64
+  machine a plain `make` builds the ARM64 library.
+- `make test-arm64`: the same test suites as `make test`, run on the ARM64 build (under QEMU on
+  an x86-64 machine).
+- A macOS mode in the ARM64 sources (`as --defsym APPLE=1`: underscore-prefixed symbol names and
+  Mach-O sections). It has never been assembled or run.
+
+### Verified (ARM64, under QEMU emulation on Linux)
+- The 2,505 WAV checks and 480+ random FLAC streams with 1,100+ seeks pass with no failures.
+- Output is identical to the x86-64 decoder and to `dr_flac` on every real ffmpeg-encoded file
+  tried (levels 0 to 12, mono, 5.1, 96 kHz, 24-bit), including volume scaling.
+- 1.2 million fuzz inputs (2.4 billion frames), with the input and workspace against unmapped guard
+  pages: no crash, hang or out-of-bounds access.
+- 17 deliberate breakages of the ARM64 decoder, all caught by the tests.
+
+### Not verified
+- Real ARM hardware: the port has only been run under emulation, and **its speed has not been
+  measured**.
+- Apple Silicon Macs, iPhones and Windows on ARM.
+- 32-bit ARM is not supported.
+
+### Unchanged
+- The x86-64 code is unchanged apart from the version in a comment. The API, the struct layout and
+  every limit listed under 0.1.0 still apply.
+
 ## 0.1.0
 
 First release. **Built from Peep 0.2.11.**

@@ -1,5 +1,5 @@
 /* Liberated Peep (lib-Peep): Peep's playback kernel as a library.  "Audio for All"
- * Version 0.1.0, built from Peep 0.2.11. Public domain (Unlicense), see LICENSE.
+ * Version 0.2.0, built from Peep 0.2.11. x86-64 and ARM64. Public domain (Unlicense), see LICENSE.
  *
  * Freestanding x86-64 assembly: no libc, no malloc, no threads, no OS calls.
  * You own all memory. Pull-based: your audio callback calls peep_fill().
@@ -13,7 +13,7 @@
 #define PEEP_H
 #include <stddef.h>
 #include <stdint.h>
-#define LIBPEEP_VERSION "0.1.0"
+#define LIBPEEP_VERSION "0.2.0"
 
 #ifdef __cplusplus
 extern "C" {
