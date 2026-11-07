@@ -6,7 +6,7 @@ hands back stereo 16-bit samples, on demand. It plays nothing by itself; your pr
 the samples to a sound device.
 
 **Branches.** `main` is the assembly and documentation only, at the old x86-64 version 0.1.2. **`dev` (this branch) has the library
-at 0.5.0, byte-identical to `arm64`, plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
+at 0.5.0, identical to `arm64` except for one experiment in `flac.asm` (fused fixed-predictor decoding, x86-64 only; see the CHANGELOG), plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
 `third_party/`, `tools/`), the audio-quality tests, and the AppImage tooling. `arm64` has all of that and also the 22 language packages
 (`Downloads/`) and their bindings (`bindings/`), which are not on this branch. The earlier x86-64-only AGENTS.md is kept at the
 end of this file, marked as historical: where it disagrees with the text above, the text above is right.
@@ -894,7 +894,7 @@ typedef struct peep_codec {
   constants at the top of `peep.asm`, the `P_*` / `S_*` constants (`P_ERRS` 152, `P_DITH` 156, `P_BITS` 158 are new) at the top of `flac.asm`, the
   `P_*` constants in `arm64/abi_a64.inc`, and the `S_*` constants at the top of `arm64/flac.s`.
   Change one, change all, then run the tests.
-* **This is the `dev` branch:** the library here is byte-identical to the `arm64` branch (check with `git diff origin/arm64 -- peep.asm flac.asm wav.asm abi.inc peep.h arm64`), plus the test suite. `main` stays assembly and documentation only, at the old 0.1.2 library. A library change made here must also go to `arm64`, and keep the tests on `dev`/`arm64`, never on `main`.
+* **This is the `dev` branch:** the library here is identical to the `arm64` branch except `flac.asm`, which carries the fused fixed-predictor experiment (check with `git diff origin/arm64 -- peep.asm flac.asm wav.asm abi.inc peep.h arm64`; only `flac.asm` should differ). `arm64` is the unchanged baseline to compare speed against. The ARM64 port (`arm64/flac.s`) does not have the change yet, and per the rule above it must get it before the change can go to `arm64`. `main` stays assembly and documentation only, at the old 0.1.2 library. A library change made here must also go to `arm64`, and keep the tests on `dev`/`arm64`, never on `main`.
 * Beyond `make test` and `make test-arm64`, run `make test-audio` (stutter, click and garble tests; part of `make test`). `make clean` deletes `build/`, which also holds the tracked `build/libpeep-test-x86_64.AppImage`: restore it with `git checkout -- build/libpeep-test-x86_64.AppImage` afterwards.
 * The two ports are the same design in two instruction sets. A behaviour change belongs in both, and
   both must pass the same tests: `make test` (x86-64) and `make test-arm64` (ARM64).

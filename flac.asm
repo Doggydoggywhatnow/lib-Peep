@@ -83,6 +83,8 @@ L_MID    equ 416
 L_FIX    equ 424                  ; order of a fixed predictor, 0 for LPC
 L_CRC    equ 432                  ; the CRC-16 stored in the frame
 L_WIDE   equ 440                  ; 0: read() int16, 1: read32() int32
+L_ESCP   equ 448                  ; escape partition: where it starts
+L_ESCN   equ 456                  ; and how many samples it holds
 
 section .text
 
@@ -503,6 +505,8 @@ ff_scan:
 
 ; ============================================================================
 ; Residual: Rice-coded, writes plane[order .. blocksize). Hot loop.
+; Fixed predictors (order 1 to 4) are applied here, in the same loop, as each sample is decoded: the predictor's
+; short dependency chain then runs alongside the bit reader's instead of in a second pass. esi = the previous sample.
 ; ============================================================================
 decode_residual:
     mov  ecx, 2
@@ -531,6 +535,7 @@ decode_residual:
     mov  eax, LOC(L_ORDER)
     lea  rdi, [rdi + rax * 4]
 .part:
+    mov  esi, [rdi - 4]               ; previous sample (fixed predictors); front slack makes order 0 safe too
     mov  ecx, LOC(L_PBITS)
     call br_get
     mov  r10d, eax                    ; Rice parameter k, or the escape code
@@ -566,6 +571,36 @@ decode_residual:
     and  r8d, 1
     neg  r8
     xor  rax, r8                      ; zig-zag: (u >> 1) ^ -(u & 1)
+    mov  edx, LOC(L_FIX)
+    test edx, edx
+    jz   .st                          ; LPC or order 0: predicted later, in predict
+    cmp  edx, 2
+    jb   .p1
+    je   .p2
+    cmp  edx, 3
+    je   .p3
+.p4:mov  edx, [rdi - 12]              ; order 4: 4(c1 + c3) - 6c2 - c4 (older samples are read back from the plane)
+    add  edx, esi
+    shl  edx, 2
+    mov  r8d, [rdi - 8]
+    lea  r8d, [r8 + r8 * 2]
+    add  r8d, r8d
+    sub  edx, r8d
+    sub  edx, [rdi - 16]
+    add  eax, edx
+    jmp  .st
+.p3:mov  edx, esi                     ; order 3: 3(c1 - c2) + c3
+    sub  edx, [rdi - 8]
+    lea  edx, [rdx + rdx * 2]
+    add  edx, [rdi - 12]
+    add  eax, edx
+    jmp  .st
+.p2:lea  edx, [rsi + rsi]             ; order 2: 2c1 - c2
+    sub  edx, [rdi - 8]
+    add  eax, edx
+    jmp  .st
+.p1:add  eax, esi                     ; order 1: c1
+.st:mov  esi, eax
     mov  [rdi], eax
     add  rdi, 4
     dec  r9d
@@ -626,12 +661,14 @@ decode_residual:
     mov  r8d, eax
     test r9d, r9d
     jz   .pdone
+    mov  LOC(L_ESCP), rdi             ; remember the region: a fixed predictor still has to be run over it
+    mov  LOC(L_ESCN), r9d
     test r8d, r8d
     jnz  .eraw
     xor  eax, eax
     mov  ecx, r9d
     rep  stosd
-    jmp  .pdone
+    jmp  .edone
 .eraw:
     mov  ecx, r8d
     call br_gets
@@ -639,6 +676,16 @@ decode_residual:
     add  rdi, 4
     dec  r9d
     jnz  .eraw
+.edone:
+    mov  eax, LOC(L_FIX)
+    test eax, eax
+    jz   .pdone
+    mov  rsi, LOC(L_ESCP)             ; predict only this region (its history is in the plane before it)
+    mov  r9d, LOC(L_ESCN)
+    call predict.fixed_at
+    mov  rdi, LOC(L_ESCP)
+    mov  eax, LOC(L_ESCN)
+    lea  rdi, [rdi + rax * 4]
 .pdone:
     mov  r9d, LOC(L_PSIZE)
     dec  dword LOC(L_NPART)
@@ -662,7 +709,7 @@ predict:
     jbe  .done
     mov  eax, LOC(L_FIX)
     test eax, eax
-    jnz  .fixed
+    jnz  .done                        ; a fixed predictor was already applied inside decode_residual
     lea  rdi, LOC(L_COEF)
     lea  eax, [r8 + 3]
     and  eax, -4                      ; P = order rounded up to a multiple of 4
@@ -732,9 +779,7 @@ predict:
     jnz  .sample
 .done:
     ret
-.fixed:                               ; fixed predictors: previous samples in registers, wrap-around int32
-    mov  rsi, LOC(L_PLANE)
-    lea  rsi, [rsi + r8 * 4]          ; &x[order]
+.fixed_at:                            ; fixed predictors over a region: rsi = &x[start], r9d = count, eax = order
     cmp  eax, 2
     jb   .f1
     je   .f2

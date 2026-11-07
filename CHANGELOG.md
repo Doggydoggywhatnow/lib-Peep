@@ -11,6 +11,23 @@ All notable changes to Liberated Peep.
   a position that does not advance, and others) are all caught. It found two gaps in its own first version (no truncated-file
   case, no stereo volume case), now closed.
 
+### Experiment (dev branch): fused fixed-predictor decoding, x86-64 only
+- `flac.asm`: fixed predictors of order 1 to 4 are now applied inside `decode_residual`, as each sample is decoded, instead of in a second
+  pass. The predictor's short dependency chain then runs alongside the bit reader's chain. Escape-coded partitions run the old fixed loop over
+  just their region. LPC subframes are unchanged. No API, struct, workspace or output change.
+- Measured against the unchanged `arm64` branch (same machine, alternating runs, min and median of 6): **level 0 +17%, level 2 +11 to +12%**
+  (the gap to `dr_flac` fell from -17% to about -4% and -9%); level 5, 8, 12, mono, 6-channel, 96 kHz and 24-bit within about +-2%
+  (level 5 and 96 kHz about -2% at worst, which is within this VM's noise of about 5%).
+- Found by profiling first: ablation (skip a stage and time it) showed stereo reconstruction and interleaving cost about nothing, CRC-16 2 to 10%,
+  prediction 18 to 57%, and the rest residual decoding; a branch-free bit-cache refill, tried because a branch simulator blamed the refill check for
+  92% of mispredicts, gained at most 3% and was dropped.
+- Tests: `make test` (x86-64) passes, including 300 random streams with escape partitions, the audio suite and 200,000 fuzz inputs. 9 deliberate
+  breakages of the new code (wrong formula terms, a missing history reload, an escape partition left unpredicted or with a wrong end pointer, and
+  others) were all caught.
+- Not done: the ARM64 port (`arm64/flac.s` is unchanged, so the two ports now differ on `dev`); the change is not on the `arm64` branch.
+  The remaining gaps to `dr_flac` (96 kHz about -21%, 24-bit about -28%, levels 5 and 8 about -4% to -10%) are LPC and wide-residual cases and
+  need their own look. Measured on a shared x86-64 cloud VM, not on an idle machine.
+
 ### Changed (dev branch)
 - The library files on `dev` (`peep.asm`, `flac.asm`, `wav.asm`, `abi.inc`, `peep.h`, `arm64/`) were replaced by the 0.5.0 versions from the `arm64` branch, with the tools and Makefile that depend on them; the documentation was merged, keeping the old text in an archive section at the end of each file. The old x86-64-only changelog (0.1.0 to 0.1.2) is at the end of this file.
 
