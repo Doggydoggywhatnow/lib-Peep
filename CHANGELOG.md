@@ -66,6 +66,12 @@ All notable changes to Liberated Peep.
   slower, and wrong). None closes the gap and the cause of the loop's low instruction rate is still unknown; finding it needs hardware performance counters, which this VM does not provide.
 
 
+### Experiment (dev branch): BMI2 shifts in the Rice loops, x86-64 only
+- `flac.asm`: each Rice loop now has a second copy that uses `shrx` / `shlx` (a shift by a register is one micro-op and reads no flags). `peep_open` picks it only if `cpuid` leaf 7 reports BMI2 (`BMI2F`, bit 9 of `S_SIBPS`);
+  other CPUs run the plain-shift copy. `-dNOBMI2` builds without it. Code grows by about 1.5 KB (`flac.o` 10.8 to 12.3 KB). An earlier scratch test of BMI2 shifts showed 3% at most; it gained more after the `bsr` and ordering fixes.
+- Measured against the build before it (alternating runs, same machine): 24-bit 12.04 to 11.41 ns per frame (`dr_flac` 11.45: a tie), level 0 -5%, level 2 -2%, level 5 -4%, level 8 -5%, 96 kHz -4%, mono -5%, 5.1 -4%. `make test` passes in full;
+  `make test-simd` now also runs a `-dNOBMI2` build, and the `qemu64` run covers a CPU with neither SSE4.1 nor BMI2. ARM64: not applicable, not changed.
+
 ### Experiment (dev branch): the bit reader's cache update goes first in the Rice loop, x86-64 only
 - `flac.asm`: in the fast path of the residual loop the `shl r13, cl` that drops the consumed bits now comes before the value arithmetic (a shift by `cl` depends on the flags it is given, so it
   now takes them from the short `cmp` just above, not from the value arithmetic). The instruction set is unchanged, only the order, so output is identical. ARM64 not changed or measured.

@@ -63,6 +63,10 @@ test-wavc: $(B)/peepdump $(B)/testwavc_ws $(SEEDDIR)
 # instruction would crash, so a wrong cpuid check (inverted, wrong bit, ignored) fails here. Needs qemu-x86_64 for (2); skipped with a notice if absent.
 QEMUX ?= qemu-x86_64
 $(B)/flac_nosimd.o: flac.asm abi.inc | $(B);   $(NASM) -dNOSIMD -f elf64 $< -o $@
+$(B)/flac_nobmi2.o: flac.asm abi.inc | $(B);   $(NASM) -dNOBMI2 -f elf64 $< -o $@
+$(B)/libpeep_nobmi2.a: $(B)/peep.o $(B)/flac_nobmi2.o $(B)/wav.o $(B)/wavc.o;   rm -f $@; ar rcs $@ $^
+$(B)/peepdump_nobmi2: tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nobmi2.a
+	$(CC) -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nobmi2.a -lm
 $(B)/libpeep_nosimd.a: $(B)/peep.o $(B)/flac_nosimd.o $(B)/wav.o $(B)/wavc.o;   rm -f $@; ar rcs $@ $^
 $(B)/peepdump_nosimd: tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nosimd.a
 	$(CC) -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nosimd.a -lm
@@ -70,7 +74,9 @@ $(B)/peepdump_static: tools/peepdump.c $(B)/drflac.o $(B)/libpeep.a
 	$(CC) -static -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep.a -lm
 $(B)/run_nosse41.sh: $(B)/peepdump_static
 	printf '#!/bin/sh\nexec $(QEMUX) -cpu qemu64 $(CURDIR)/$(B)/peepdump_static "$$@"\n' > $@; chmod +x $@
-test-simd: $(B)/peepdump $(B)/peepdump_nosimd $(SEEDDIR)
+test-simd: $(B)/peepdump $(B)/peepdump_nosimd $(B)/peepdump_nobmi2 $(SEEDDIR)
+	python3 tools/mkflac.py --run 60 --seed 9 --tool $(B)/peepdump_nobmi2
+	python3 tools/testhires.py --run 12 --seed 5 --tool $(B)/peepdump_nobmi2
 	python3 tools/mkflac.py --run 60 --seed 7 --tool $(B)/peepdump_nosimd
 	python3 tools/testhires.py --run 12 --seed 3 --tool $(B)/peepdump_nosimd
 	@if command -v $(QEMUX) >/dev/null 2>&1; then $(MAKE) --no-print-directory $(B)/run_nosse41.sh && \

@@ -45,6 +45,7 @@ S_BLK0   equ 100                  ; u32 STREAMINFO min block size (fixed-size st
 S_BPS    equ 104                  ; u32 bits per sample of the decoded block
 S_SIBPS  equ 108                  ; u32 STREAMINFO bits per sample (low byte); bit 8 = SIMDF
 SIMDF    equ 0x100                ; set at open when cpuid reports SSE4.1: predict then uses the SIMD multiply loop
+BMI2F    equ 0x200                ; set at open when cpuid reports BMI2: the Rice loops then use shrx / shlx
 S_SPOS   equ 112                  ; u64 first sample number of the decoded block
 S_PLANE0 equ 120                  ; u64 address of plane 0 (work + 16)
 
@@ -88,7 +89,7 @@ L_ESCP   equ 448                  ; escape partition: where it starts
 L_ESCN   equ 456                  ; and how many samples it holds
 L_PB     equ 464                  ; LPC: bytes in the (padded) window, 4 * P
 L_PM4    equ 472                  ; LPC: P - 4, the taps the loops handle before the newest four
-L_MODE   equ 480                  ; residual loop flavour: 0 none, 1 fixed predictor, 2 LPC scalar, 3 LPC SSE4.1
+L_MODE   equ 480                  ; residual loop flavour: 0 none, 1 fixed predictor, 2 LPC scalar, 3 LPC SSE4.1; plus 4 for the BMI2 copy of each
 
 section .text
 
@@ -514,12 +515,12 @@ ff_scan:
 ; ============================================================================
 
 ; ----------------------------------------------------------------------------
-; RICE entry, mode: the Rice residual loop for one partition, with the prediction done in the same loop as each sample is decoded
+; RICE entry, mode, bmi2: the Rice residual loop for one partition, with the prediction done in the same loop as each sample is decoded
 ; (the predictor's dependency chain then runs alongside the bit reader's instead of in a second pass). One copy per mode so the loop
 ; itself has no mode tests.  mode 0: none (order 0)   1: fixed predictor, orders 1 to 4   2: LPC, scalar   3: LPC, SSE4.1 (older taps)
 ; In: r9d = samples left in the partition, r10d = Rice parameter k, rdi = output, esi = previous sample, r12 to r15 = bit reader.
 ; ----------------------------------------------------------------------------
-%macro RICE 2
+%macro RICE 3
 %1:
 %%rs:
     cmp  r14d, 32
@@ -533,6 +534,16 @@ ff_scan:
     lea  edx, [rax + r10 + 1]         ; t = q + 1 + k bits for this sample
     cmp  edx, r14d
     ja   %%more                       ; not all in the cache: slow path
+%if %3
+    mov  ecx, edx                     ; BMI2: shifts by a register are one micro-op and take no flags
+    neg  ecx                          ; (64 - t) mod 64
+    shrx r8, r13, rcx                 ; V = top t bits = (1 << k) | low
+    shlx r13, r13, rdx                ; drop t bits: the loop-carried work of the bit reader
+    sub  r14d, edx
+    lea  r11, [rax - 1]               ; u = V + ((q - 1) << k)
+    shlx r11, r11, r10
+    add  r8, r11
+%else
     mov  r8, r13                      ; the old cache, kept for the value
     mov  ecx, edx                     ; the loop-carried work of the bit reader first: drop t bits. Its flags then come from the short
     shl  r13, cl                      ; cmp above, not from the value arithmetic below (a shift by cl depends on the flags it is given)
@@ -544,6 +555,7 @@ ff_scan:
     mov  ecx, r10d
     shl  r11, cl
     add  r8, r11
+%endif
 %%zz:
     mov  rax, r8
     shr  rax, 1
@@ -754,6 +766,12 @@ decode_residual:
 .mfixed:
     mov  eax, 1
 .modeset:
+%ifndef NOBMI2
+    test dword [rbx + S_SIBPS], BMI2F
+    jz   .modeset2
+    or   eax, 4                       ; the BMI2 copy of that loop
+.modeset2:
+%endif
     mov  LOC(L_MODE), eax
 .part:
     mov  esi, [rdi - 4]               ; previous sample (fixed predictors); front slack makes order 0 safe too
@@ -769,6 +787,10 @@ decode_residual:
     test r9d, r9d
     jz   .pdone
     mov  eax, LOC(L_MODE)
+%ifndef NOBMI2
+    test eax, 4
+    jnz  .rsb
+%endif
     test eax, eax
     jz   .rs0
     cmp  eax, 2
@@ -779,11 +801,32 @@ decode_residual:
 %else
     jmp  .rs2
 %endif
-    RICE .rs0, 0
-    RICE .rs1, 1
-    RICE .rs2, 2
+%ifndef NOBMI2
+.rsb:
+    and  eax, 3
+    jz   .rs4
+    cmp  eax, 2
+    jb   .rs5
+    je   .rs6
 %ifndef NOSIMD
-    RICE .rs3, 3
+    jmp  .rs7
+%else
+    jmp  .rs6
+%endif
+%endif
+    RICE .rs0, 0, 0
+    RICE .rs1, 1, 0
+    RICE .rs2, 2, 0
+%ifndef NOSIMD
+    RICE .rs3, 3, 0
+%endif
+%ifndef NOBMI2
+    RICE .rs4, 0, 1
+    RICE .rs5, 1, 1
+    RICE .rs6, 2, 1
+%ifndef NOSIMD
+    RICE .rs7, 3, 1
+%endif
 %endif
 .escape:                              ; partition stored as n-bit signed integers
     mov  ecx, 5
@@ -1531,6 +1574,24 @@ FUNCL flac_open, FLOC
     jnc  .nosimd
     or   dword [rbx + S_SIBPS], SIMDF
 .nosimd:
+%endif
+%ifndef NOBMI2
+    push rbx                          ; cpuid leaf 7, EBX bit 8 = BMI2 (shrx, shlx), if the CPU has a leaf 7. Build with -dNOBMI2 to force the plain shifts.
+    xor  eax, eax
+    cpuid
+    cmp  eax, 7
+    jb   .nobmi2
+    mov  eax, 7
+    xor  ecx, ecx
+    cpuid
+    bt   ebx, 8
+    jnc  .nobmi2
+    pop  rbx
+    or   dword [rbx + S_SIBPS], BMI2F
+    jmp  .bmi2done
+.nobmi2:
+    pop  rbx
+.bmi2done:
 %endif
     mov  eax, 1
     RET_
