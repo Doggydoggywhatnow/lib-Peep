@@ -35,6 +35,7 @@ $(SEEDDIR): tools/mkflac.py
 test: $(B)/peepdump $(B)/fuzz $(SEEDDIR)
 	python3 tools/testwav.py $(B)/peepdump
 	python3 tools/mkflac.py --run 120 --seed 1 --tool $(B)/peepdump
+	python3 tools/testcrc.py --run 300 --seed 1 --tool $(B)/peepdump
 	$(B)/fuzz 200000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac
 fuzz: $(B)/fuzz $(SEEDDIR)
 	for k in 1 2 3 4; do FUZZSEED=$$k $(B)/fuzz 2000000 $(SEEDDIR)/s*.flac & done; wait

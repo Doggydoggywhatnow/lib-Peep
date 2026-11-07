@@ -1,6 +1,6 @@
 # AGENTS.md: using Liberated Peep (lib-Peep) in a project
 
-For AI coding agents. Liberated Peep ("Audio for All", version 0.1.1, built from Peep
+For AI coding agents. Liberated Peep ("Audio for All", version 0.1.2, built from Peep
 0.2.11) is a tiny audio-decoding library: you give it the bytes of a WAV or FLAC file and it
 hands back stereo 16-bit samples, on demand. It plays nothing by itself; your program sends
 the samples to a sound device.
@@ -87,11 +87,10 @@ shape for a library whose whole point is to be dropped into anything:
   (`work_need`) and never allocates behind your back.
 * **Real-time safety.** With no allocation, no locks and no system calls, `peep_fill` has
   predictable timing, which is what an audio callback needs.
-* **Size.** The native FLAC decoder is 4.2 KB of code; `dr_flac` is about 90 KB. The whole
-  library, WAV and FLAC together, is 5.5 KB.
-* **Speed costs nothing.** Native FLAC decodes between 16% slower and 16% faster than
-  `dr_flac` depending on the file, roughly 700 to 2,500 times faster than real time. Choosing the
-  small decoder does not slow anything audible.
+* **Size.** The native FLAC decoder is 8.6 KB of code (4 KB of that is the CRC-16 tables); `dr_flac` is
+  about 90 KB. The whole library, WAV and FLAC together, is 9.9 KB.
+* **Speed costs nothing you can hear.** Native FLAC, with every frame's CRC-16 checked, decodes between 25%
+  slower and 5% faster than `dr_flac` depending on the file, roughly 700 to 2,600 times faster than real time.
 * **Behaviour you can reason about.** Corrupt data is resynchronised over, seeking needs no seek
   table, work on hostile input is bounded, and every claim is checked against ground truth
   (see "Tests") rather than assumed.
@@ -158,6 +157,7 @@ typedef struct peep_codec {
 * It is x86-64 only. It has not been run on ARM, so it does not work on Apple Silicon Macs, phones or
   Raspberry Pi. macOS on Intel is untested and would need `-f macho64` and underscore-prefixed symbols.
 * The Windows build has been tested under Wine, not on real Windows.
-* FLAC audio data is not CRC-16 checked, so a flipped bit inside audio gives a wrong sample.
+* A damaged FLAC frame (its CRC-16 fails) is output as silence of the same length and decoding carries on;
+  there is no way yet for the caller to be told that it happened.
 * FLAC above 24 bits, MP3 and Vorbis are not handled natively.
 * WAV is 16-bit PCM only (8-bit, 24-bit and float WAV need a codec).

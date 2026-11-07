@@ -237,7 +237,7 @@ def encode_frame(chans, start, number, variable, rate, bps, bps_explicit, rng):
     bw.pad()
     body = hb + bw.bytes()
     c = crc16(body)
-    return body + bytes([c >> 8, c & 0xFF])
+    return body + bytes([c >> 8, c & 0xFF]), len(hb)     # frame bytes, header length
 
 def streaminfo(minbs, maxbs, rate, nch, bps, total):
     v = (rate << 44) | ((nch - 1) << 41) | ((bps - 1) << 36) | total
@@ -253,12 +253,13 @@ def gen_case(rng):
     if variable: sizes = []
     bs0 = rng.choice([16, 192, 576, 1000, 1152, 1024, 4096, 4608, 4097, 255, 256, 257, 3000, 8192, 16384, 65535, 65536 // 2])
     chans = make_signal(rng, total, nch, bps) if total else [np.zeros(0, dtype=np.int64)] * nch
-    frames = []; pos = 0; number = 0; sz = []
+    frames = []; pos = 0; number = 0; sz = []; fmeta = []
     while pos < total:
         bs = rng.choice([16, 64, 192, 300, 1000, 1152, 2048, 4096, 5000]) if variable else bs0
         bs = min(bs, total - pos)
         sz.append(bs)
-        frames.append(encode_frame([c[pos:pos + bs] for c in chans], pos, number, variable, rate, bps, rng.random() < .7, rng))
+        fb, hl = encode_frame([c[pos:pos + bs] for c in chans], pos, number, variable, rate, bps, rng.random() < .7, rng)
+        frames.append(fb); fmeta.append([pos, bs, len(fb), hl])
         pos += bs; number += 1
     if not sz: sz = [bs0]
     if variable: minbs, maxbs = min(sz), max(sz)
@@ -270,12 +271,16 @@ def gen_case(rng):
     out = b'fLaC'
     for i, (t, d) in enumerate(blocks):
         out += bytes([(0x80 if i == len(blocks) - 1 else 0) | t]) + len(d).to_bytes(3, 'big') + d
+    base = len(out)
     out += b''.join(frames)
+    off = base
+    for m in fmeta:
+        m.insert(2, off); off += m[3]          # [first sample, samples, file offset, bytes, header bytes]
     # expected PCM: interleaved int16 = (x << max(0,16-bps)) >> max(0,bps-16)
     ls, rs = max(0, 16 - bps), max(0, bps - 16)
     pcm = np.stack(chans, axis=1) if total else np.zeros((0, nch), dtype=np.int64)
     pcm = ((pcm << ls) >> rs).astype('<i2')
-    info = dict(nch=nch, bps=bps, rate=rate, variable=variable, total=total, frames=len(frames), bs=bs0)
+    info = dict(nch=nch, bps=bps, rate=rate, variable=variable, total=total, frames=len(frames), bs=bs0, frame_meta=fmeta)
     return out, pcm, info
 
 def expected_stereo(pcm):
@@ -326,6 +331,7 @@ def main():
             rc3, out3, _ = run(a.tool, data, 1024, codec='dr')
             stats['dr_disagrees'] += (out3 != exp)
             d = next((i for i in range(min(len(out), len(exp))) if out[i] != exp[i]), None)
+            info = {k: v for k, v in info.items() if k != 'frame_meta'}
             print(f'FAIL seed={seed} {info} rc={rc} out={len(out)} exp={len(exp)} first_diff_byte={d} {why} | dr_flac {"agrees with truth" if out3 == exp else "ALSO differs (encoder?)"}')
             if a.keep:
                 os.makedirs(a.keep, exist_ok=True)
