@@ -66,6 +66,9 @@
 .equ L_WIDE,   440                    // 0: read() int16, 1: read32() int32
 .equ L_ESCP,   448                    // escape partition: where it starts
 .equ L_ESCN,   456                    // and how many samples it holds
+.equ L_PB,     464                    // LPC: bytes in the (padded) window, 4 * P
+.equ L_PM4,    472                    // LPC: P - 4, the taps the loop handles before the newest four
+.equ L_MODE,   480                    // residual loop flavour: 0 none, 1 fixed predictor, 2 LPC
 .equ P_CTX,    64                     // where the metadata blocks start (for peep_flac_metadata)
 
     .text
@@ -497,6 +500,165 @@ FUNCL ff_scan
 // ============================================================================
 // Residual: Rice-coded, writes plane[order .. blocksize). The hot loop.
 // ============================================================================
+// RICE entry, mode: the Rice residual loop for one partition, with the prediction done in the same loop as each sample is decoded (the predictor's
+// dependency chain then runs alongside the bit reader's instead of in a second pass). One copy per mode so the loop has no mode tests.
+// mode 0: none (order 0)   1: fixed predictor, orders 1 to 4   2: LPC (NEON for the older taps)
+// In: w9 = samples left in the partition, w10 = Rice parameter k, x24 = output, w15 = previous sample, x20 to x23 = bit reader.
+.macro RICE entry, mode
+\entry:
+.Lrs_\@:
+    cmp   w22, #32
+    b.lo  .Lrf1_\@
+.Lc1_\@:
+    cbz   x21, .Llong_\@
+    clz   x4, x21                     // q: leading zero bits
+    add   w5, w4, w10
+    add   w5, w5, #1                  // t = q + 1 + k bits for this sample
+    cmp   w5, w22
+    b.hi  .Lmore_\@                      // not all in the cache: slow path
+    mov   w6, #64
+    sub   w6, w6, w5
+    lsr   x7, x21, x6                 // V = top t bits = (1 << k) | low
+    sub   x8, x4, #1
+    lsl   x8, x8, x10                 // (q - 1) << k
+    add   x7, x7, x8                  // u = V + ((q - 1) << k) = q << k | low
+    lsl   x21, x21, x5                // the only loop-carried work: drop t bits
+    sub   w22, w22, w5
+.Lzz_\@:
+    and   x8, x7, #1
+    neg   x8, x8
+    eor   x7, x8, x7, lsr #1          // zig-zag: (u >> 1) ^ -(u & 1)
+.if \mode == 0
+    str   w7, [x24], #4
+    subs  w9, w9, #1
+    b.ne  .Lrs_\@
+    b     .Lres_pdone
+.elseif \mode == 1
+    ldr   w8, [x28, #L_FIX]
+    cmp   w8, #2
+    b.lo  .Lp1_\@
+    b.eq  .Lp2_\@
+    cmp   w8, #3
+    b.eq  .Lp3_\@
+.Lp4_\@:                                 // order 4: 4(c1 + c3) - 6c2 - c4 (older samples are read back from the plane)
+    ldur  w4, [x24, #-12]
+    add   w4, w4, w15
+    lsl   w4, w4, #2
+    ldur  w5, [x24, #-8]
+    add   w5, w5, w5, lsl #1
+    lsl   w5, w5, #1
+    sub   w4, w4, w5
+    ldur  w5, [x24, #-16]
+    sub   w4, w4, w5
+    add   w7, w7, w4
+    b     .Lst_\@
+.Lp3_\@:                                 // order 3: 3(c1 - c2) + c3
+    ldur  w4, [x24, #-8]
+    sub   w4, w15, w4
+    add   w4, w4, w4, lsl #1
+    ldur  w5, [x24, #-12]
+    add   w4, w4, w5
+    add   w7, w7, w4
+    b     .Lst_\@
+.Lp2_\@:                                 // order 2: 2c1 - c2
+    ldur  w4, [x24, #-8]
+    lsl   w5, w15, #1
+    sub   w4, w5, w4
+    add   w7, w7, w4
+    b     .Lst_\@
+.Lp1_\@:
+    add   w7, w7, w15                 // order 1: c1
+.Lst_\@:
+    mov   w15, w7
+    str   w7, [x24], #4
+    subs  w9, w9, #1
+    b.ne  .Lrs_\@
+    b     .Lres_pdone
+.else
+    ldr   w12, [x28, #L_PB]
+    sub   x11, x24, x12               // window start x[i - P]
+    add   x2, x28, #L_COEF
+    mov   x1, x11
+    ldr   w13, [x28, #L_PM4]
+    cbz   w13, .Llnov_\@
+    movi  v2.2d, #0
+.Llmac_\@:                            // NEON: 4 taps per pass as two 2-lane signed 32x32 -> 64 multiply-accumulates
+    ld1   {v0.4s}, [x1], #16          // at least 4 samples old, so long since stored (no store-forwarding stall)
+    ld1   {v1.4s}, [x2], #16
+    smlal v2.2d, v0.2s, v1.2s
+    smlal2 v2.2d, v0.4s, v1.4s
+    subs  w13, w13, #4
+    b.ne  .Llmac_\@
+    addp  d2, v2.2d
+    fmov  x14, d2
+    b     .Lltail_\@
+.Llnov_\@:
+    mov   x14, #0
+.Lltail_\@:                           // the newest four taps: x[i-4..i-2] from memory, x[i-1] from the register
+    ldp   w0, w3, [x1]
+    ldp   w16, w17, [x2]
+    smaddl x14, w0, w16, x14
+    smaddl x14, w3, w17, x14
+    ldr   w0, [x1, #8]
+    ldr   w16, [x2, #8]
+    smaddl x14, w0, w16, x14
+    ldr   w16, [x2, #12]
+    smaddl x14, w15, w16, x14
+    ldr   w0, [x28, #L_SHIFT]
+    asr   x14, x14, x0
+    add   w7, w7, w14                 // residual + prediction, int32 wrap
+    mov   w15, w7
+    str   w7, [x24], #4
+    subs  w9, w9, #1
+    b.ne  .Lrs_\@
+    b     .Lres_pdone
+.endif
+.Lrf1_\@:
+    bl    br_refill
+    b     .Lc1_\@
+.Lmore_\@:                               // x4 = q: consume the unary part, then top up for the rest
+    lsl   x21, x21, x4
+    lsl   x21, x21, #1
+    add   w6, w4, #1
+    sub   w22, w22, w6
+.Lkstage_\@:
+    cmp   w22, w10
+    b.hs  .Lc2_\@
+    bl    br_refill
+.Lc2_\@:
+    mov   w6, #63
+    sub   w6, w6, w10
+    lsr   x7, x21, #1
+    lsr   x7, x7, x6                  // k low bits
+    lsl   x21, x21, x10
+    sub   w22, w22, w10
+    lsl   x8, x4, x10
+    orr   x7, x7, x8                  // u = q << k | low
+    b     .Lzz_\@
+.Llong_\@:                               // the cache holds only zeros: keep counting
+    mov   x4, x22
+    mov   x21, #0
+    mov   x22, #0
+.Llg_\@:
+    add   x0, x23, #16
+    cmp   x20, x0
+    b.hi  .Lres_bad                   // ran far past the end of the file
+    bl    br_refill
+    cbnz  x21, .Llgf_\@
+    add   x4, x4, x22
+    mov   x21, #0
+    mov   x22, #0
+    b     .Llg_\@
+.Llgf_\@:
+    clz   x5, x21
+    add   x4, x4, x5
+    lsl   x21, x21, x5
+    lsl   x21, x21, #1
+    add   w5, w5, #1
+    sub   w22, w22, w5
+    b     .Lkstage_\@
+.endm
+
 FUNCL decode_residual
     str   x30, [sp, #-16]!
     mov   w0, #2
@@ -522,6 +684,15 @@ FUNCL decode_residual
     b.lo  .Lres_bad
     ldr   x24, [x28, #L_PLANE]
     add   x24, x24, x2, lsl #2
+    ldr   w0, [x28, #L_FIX]           // which loop: 1 fixed predictor, 2 LPC, 0 none (order 0)
+    cbnz  w0, .Lmfix
+    cbz   w2, .Lmset
+    mov   w0, #2
+    b     .Lmset
+.Lmfix:
+    mov   w0, #1
+.Lmset:
+    str   w0, [x28, #L_MODE]
 .Lres_part:
     ldur  w15, [x24, #-4]             // previous sample (fixed predictors); front slack makes order 0 safe too
     ldr   w0, [x28, #L_PBITS]
@@ -534,113 +705,14 @@ FUNCL decode_residual
     cmp   w10, w2
     b.eq  .Lres_esc
     cbz   w9, .Lres_pdone
-.Lrs:
-    cmp   w22, #32
-    b.lo  .Lrf1
-.Lc1:
-    cbz   x21, .Llong
-    clz   x4, x21                     // q: leading zero bits
-    add   w5, w4, w10
-    add   w5, w5, #1                  // t = q + 1 + k bits for this sample
-    cmp   w5, w22
-    b.hi  .Lmore                      // not all in the cache: slow path
-    mov   w6, #64
-    sub   w6, w6, w5
-    lsr   x7, x21, x6                 // V = top t bits = (1 << k) | low
-    sub   x8, x4, #1
-    lsl   x8, x8, x10                 // (q - 1) << k
-    add   x7, x7, x8                  // u = V + ((q - 1) << k) = q << k | low
-    lsl   x21, x21, x5                // the only loop-carried work: drop t bits
-    sub   w22, w22, w5
-.Lzz:
-    and   x8, x7, #1
-    neg   x8, x8
-    eor   x7, x8, x7, lsr #1          // zig-zag: (u >> 1) ^ -(u & 1)
-    ldr   w8, [x28, #L_FIX]
-    cbz   w8, .Lst                    // LPC or order 0: predicted later, in predict
-    cmp   w8, #2
-    b.lo  .Lp1
-    b.eq  .Lp2
-    cmp   w8, #3
-    b.eq  .Lp3
-.Lp4:                                 // order 4: 4(c1 + c3) - 6c2 - c4 (older samples are read back from the plane)
-    ldur  w4, [x24, #-12]
-    add   w4, w4, w15
-    lsl   w4, w4, #2
-    ldur  w5, [x24, #-8]
-    add   w5, w5, w5, lsl #1
-    lsl   w5, w5, #1
-    sub   w4, w4, w5
-    ldur  w5, [x24, #-16]
-    sub   w4, w4, w5
-    add   w7, w7, w4
-    b     .Lst
-.Lp3:                                 // order 3: 3(c1 - c2) + c3
-    ldur  w4, [x24, #-8]
-    sub   w4, w15, w4
-    add   w4, w4, w4, lsl #1
-    ldur  w5, [x24, #-12]
-    add   w4, w4, w5
-    add   w7, w7, w4
-    b     .Lst
-.Lp2:                                 // order 2: 2c1 - c2
-    ldur  w4, [x24, #-8]
-    lsl   w5, w15, #1
-    sub   w4, w5, w4
-    add   w7, w7, w4
-    b     .Lst
-.Lp1:
-    add   w7, w7, w15                 // order 1: c1
-.Lst:
-    mov   w15, w7
-    str   w7, [x24], #4
-    subs  w9, w9, #1
-    b.ne  .Lrs
-    b     .Lres_pdone
-.Lrf1:
-    bl    br_refill
-    b     .Lc1
-.Lmore:                               // x4 = q: consume the unary part, then top up for the rest
-    lsl   x21, x21, x4
-    lsl   x21, x21, #1
-    add   w6, w4, #1
-    sub   w22, w22, w6
-.Lkstage:
-    cmp   w22, w10
-    b.hs  .Lc2
-    bl    br_refill
-.Lc2:
-    mov   w6, #63
-    sub   w6, w6, w10
-    lsr   x7, x21, #1
-    lsr   x7, x7, x6                  // k low bits
-    lsl   x21, x21, x10
-    sub   w22, w22, w10
-    lsl   x8, x4, x10
-    orr   x7, x7, x8                  // u = q << k | low
-    b     .Lzz
-.Llong:                               // the cache holds only zeros: keep counting
-    mov   x4, x22
-    mov   x21, #0
-    mov   x22, #0
-.Llg:
-    add   x0, x23, #16
-    cmp   x20, x0
-    b.hi  .Lres_bad                   // ran far past the end of the file
-    bl    br_refill
-    cbnz  x21, .Llgf
-    add   x4, x4, x22
-    mov   x21, #0
-    mov   x22, #0
-    b     .Llg
-.Llgf:
-    clz   x5, x21
-    add   x4, x4, x5
-    lsl   x21, x21, x5
-    lsl   x21, x21, #1
-    add   w5, w5, #1
-    sub   w22, w22, w5
-    b     .Lkstage
+    ldr   w0, [x28, #L_MODE]
+    cbz   w0, .Lrs0
+    cmp   w0, #1
+    b.eq  .Lrs1
+    b     .Lrs2
+    RICE  .Lrs0, 0
+    RICE  .Lrs1, 1
+    RICE  .Lrs2, 2
 .Lres_esc:                            // partition stored as n-bit signed integers
     mov   w0, #5
     bl    br_get
@@ -662,10 +734,18 @@ FUNCL decode_residual
     b.ne  .Lres_eraw
 .Lres_edone:
     ldr   w0, [x28, #L_FIX]
-    cbz   w0, .Lres_pdone
-    ldr   x10, [x28, #L_ESCP]         // predict only this region (its history is in the plane before it)
+    cbnz  w0, .Lres_efix
+    ldr   w1, [x28, #L_ORDER]
+    cbz   w1, .Lres_pdone
+    ldr   x10, [x28, #L_ESCP]         // LPC: predict only this region (its history is in the plane before it)
+    ldr   w5, [x28, #L_ESCN]
+    bl    lpc_run
+    b     .Lres_erest
+.Lres_efix:
+    ldr   x10, [x28, #L_ESCP]         // fixed predictor: the same for the region
     ldr   w5, [x28, #L_ESCN]
     bl    .Lpr_fixed_at
+.Lres_erest:
     ldr   x24, [x28, #L_ESCP]
     ldr   w0, [x28, #L_ESCN]
     add   x24, x24, x0, lsl #2
@@ -688,14 +768,9 @@ FUNCL decode_residual
 // sample width is exact. The newest sample stays in a register, so the serial chain
 // never goes through memory. Clobbers x0-x17.
 // ============================================================================
-FUNCL predict
+// lpc_prep: once per LPC subframe, before decode_residual: pad the coefficients to a multiple of 4 taps (zeros on the old side) and record the window size.
+FUNCL lpc_prep
     ldr   w4, [x28, #L_ORDER]
-    cbz   w4, .Lpr_done
-    ldr   w5, [x28, #L_BS]
-    subs  w5, w5, w4                  // samples to predict
-    b.ls  .Lpr_done
-    ldr   w0, [x28, #L_FIX]
-    cbnz  w0, .Lpr_done               // a fixed predictor was already applied inside decode_residual
     add   x6, x28, #L_COEF
     add   w7, w4, #3
     and   w7, w7, #0xFFFFFFFC         // P = order rounded up to a multiple of 4
@@ -715,11 +790,20 @@ FUNCL predict
     cmp   w9, w8
     b.lo  .Lpr_zp
 .Lpr_padded:
-    ldr   x9, [x28, #L_PLANE]
-    add   x10, x9, x4, lsl #2         // output: x[i], the first predicted sample
-    sub   x11, x9, x8, lsl #2         // window start x[order - P] (up to 3 slots of front slack)
+    lsl   w0, w7, #2
+    str   w0, [x28, #L_PB]
+    sub   w0, w7, #4
+    str   w0, [x28, #L_PM4]
+    ret
+
+// lpc_run: LPC prediction over a region, in place: x10 = &x[start], w5 = count (>= 1). The whole-subframe case is done inside decode_residual;
+// this is for escape-coded partitions. 64-bit accumulator (smaddl), so any precision and any sample width is exact.
+FUNCL lpc_run
+    add   x6, x28, #L_COEF
+    ldr   w0, [x28, #L_PB]
+    sub   x11, x10, x0                // window start x[start - P] (up to 3 slots of front slack)
     ldrsw x12, [x10, #-4]             // x[i-1] lives in a register
-    sub   w13, w7, #4                 // the last 4 window slots are handled outside the loop
+    ldr   w13, [x28, #L_PM4]          // the last 4 window slots are handled outside the loop
     ldr   w14, [x28, #L_SHIFT]
 .Lpr_s:
     mov   x1, x11
@@ -940,9 +1024,13 @@ FUNCL decode_subframe
     subs  w13, w13, #1
     b.ne  .Lsf_cf
 .Lsf_resid:
-    bl    decode_residual
+    ldr   w0, [x28, #L_FIX]
+    cbnz  w0, 1f
+    ldr   w0, [x28, #L_ORDER]
+    cbz   w0, 1f
+    bl    lpc_prep                    // LPC: pad the coefficients; decode_residual then predicts as it decodes
+1:  bl    decode_residual
     cbz   w0, .Lsf_bad
-    bl    predict
 .Lsf_wasted:
     ldr   w0, [x28, #L_WASTED]
     cbz   w0, .Lsf_ok

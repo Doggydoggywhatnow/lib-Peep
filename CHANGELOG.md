@@ -55,8 +55,16 @@ All notable changes to Liberated Peep.
   96 kHz **+25%** (from 18% slower to **3% faster**), level 8 +15%, level 12 +13%, mono +19%, 5.1 +15%, 24-bit +19% (still **14% slower than `dr_flac`**); levels 0 and 2 (fixed predictors) unchanged
   and still 8 to 10% slower.
 - Tests: `make test` (x86-64) passes in full, including the 300 random streams with escape partitions, the audio suite, `make test-simd` and 200,000 fuzz inputs.
-- Not done: the ARM64 port (`arm64/flac.s` still predicts in a second pass, so the two ports now differ on `dev`); breakage testing of the new loops; 24-bit and the fixed-predictor files still behind `dr_flac`.
-  Measured on a shared x86-64 VM.
+- **ARM64 port done** (`arm64/flac.s`): the same design (a macro expanded for no prediction, fixed predictor and LPC; NEON `smlal` for the older taps, then the newest four taps scalar from
+  the register; `predict` split into `lpc_prep` and `lpc_run`). `make test-arm64` passes in full under QEMU (including the audio tests and the 100,000-input fuzz run). ARM64 speed is **not measured**.
+- Breakage check: 13 deliberate breakages of the new loops on x86-64 and 12 on ARM64 (wrong coefficient, newest tap, window start, lane sums, padding, escape partitions, mode selection and others);
+  all caught except one on each CPU that cannot change the output (an LPC shift made logical instead of arithmetic: the shift is at most 15, so only bits that the 32-bit result never uses differ).
+- Still behind `dr_flac`: **24-bit by about 14%** and the fixed-predictor files (levels 0 and 2) by 8 to 10%. Measured on a shared x86-64 VM.
+- 24-bit investigation (x86-64; nothing from it is in the code). At about 3.7 GHz the 24-bit file runs 3.3 instructions per cycle against 4.2 for `dr_flac`, and with prediction switched off the Rice loop
+  alone takes 11.0 ns of the 12.9 ns frame (`dr_flac`'s whole decode is 11.2 ns), so the remaining gap is the bit-reading loop. Tried in scratch copies and measured: BMI2 variable shifts (at most +3%),
+  a branch-free refill (about 0%), a bit-position reader decoding two samples per 8-byte load (identical output, +3% on 24-bit and up to +9% on 96 kHz with prediction off), and a 56-bit refill (3 to 10%
+  slower, and wrong). None closes the gap and the cause of the loop's low instruction rate is still unknown; finding it needs hardware performance counters, which this VM does not provide.
+
 
 ### Added (dev branch): compressed WAV codec, `peep_codec_wavc`
 - `wavc.asm` and `arm64/wavc.s` (about 2.5 KB each), pure assembly: **A-law** (tag 6) and **mu-law** (tag 7), 1 to 8 channels, plain or extensible headers;
