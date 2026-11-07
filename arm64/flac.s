@@ -64,6 +64,8 @@
 .equ L_FIX,    424                    // order of a fixed predictor, 0 for LPC
 .equ L_CRC,    432                    // the CRC-16 stored in the frame
 .equ L_WIDE,   440                    // 0: read() int16, 1: read32() int32
+.equ L_ESCP,   448                    // escape partition: where it starts
+.equ L_ESCN,   456                    // and how many samples it holds
 .equ P_CTX,    64                     // where the metadata blocks start (for peep_flac_metadata)
 
     .text
@@ -521,6 +523,7 @@ FUNCL decode_residual
     ldr   x24, [x28, #L_PLANE]
     add   x24, x24, x2, lsl #2
 .Lres_part:
+    ldur  w15, [x24, #-4]             // previous sample (fixed predictors); front slack makes order 0 safe too
     ldr   w0, [x28, #L_PBITS]
     bl    br_get
     mov   w10, w0                     // Rice parameter k, or the escape code
@@ -553,6 +556,43 @@ FUNCL decode_residual
     and   x8, x7, #1
     neg   x8, x8
     eor   x7, x8, x7, lsr #1          // zig-zag: (u >> 1) ^ -(u & 1)
+    ldr   w8, [x28, #L_FIX]
+    cbz   w8, .Lst                    // LPC or order 0: predicted later, in predict
+    cmp   w8, #2
+    b.lo  .Lp1
+    b.eq  .Lp2
+    cmp   w8, #3
+    b.eq  .Lp3
+.Lp4:                                 // order 4: 4(c1 + c3) - 6c2 - c4 (older samples are read back from the plane)
+    ldur  w4, [x24, #-12]
+    add   w4, w4, w15
+    lsl   w4, w4, #2
+    ldur  w5, [x24, #-8]
+    add   w5, w5, w5, lsl #1
+    lsl   w5, w5, #1
+    sub   w4, w4, w5
+    ldur  w5, [x24, #-16]
+    sub   w4, w4, w5
+    add   w7, w7, w4
+    b     .Lst
+.Lp3:                                 // order 3: 3(c1 - c2) + c3
+    ldur  w4, [x24, #-8]
+    sub   w4, w15, w4
+    add   w4, w4, w4, lsl #1
+    ldur  w5, [x24, #-12]
+    add   w4, w4, w5
+    add   w7, w7, w4
+    b     .Lst
+.Lp2:                                 // order 2: 2c1 - c2
+    ldur  w4, [x24, #-8]
+    lsl   w5, w15, #1
+    sub   w4, w5, w4
+    add   w7, w7, w4
+    b     .Lst
+.Lp1:
+    add   w7, w7, w15                 // order 1: c1
+.Lst:
+    mov   w15, w7
     str   w7, [x24], #4
     subs  w9, w9, #1
     b.ne  .Lrs
@@ -606,18 +646,29 @@ FUNCL decode_residual
     bl    br_get
     mov   w11, w0
     cbz   w9, .Lres_pdone
+    str   x24, [x28, #L_ESCP]         // remember the region: a fixed predictor still has to be run over it
+    str   w9, [x28, #L_ESCN]
     cbnz  w11, .Lres_eraw
 .Lres_ez:
     str   wzr, [x24], #4
     subs  w9, w9, #1
     b.ne  .Lres_ez
-    b     .Lres_pdone
+    b     .Lres_edone
 .Lres_eraw:
     mov   w0, w11
     bl    br_gets
     str   w0, [x24], #4
     subs  w9, w9, #1
     b.ne  .Lres_eraw
+.Lres_edone:
+    ldr   w0, [x28, #L_FIX]
+    cbz   w0, .Lres_pdone
+    ldr   x10, [x28, #L_ESCP]         // predict only this region (its history is in the plane before it)
+    ldr   w5, [x28, #L_ESCN]
+    bl    .Lpr_fixed_at
+    ldr   x24, [x28, #L_ESCP]
+    ldr   w0, [x28, #L_ESCN]
+    add   x24, x24, x0, lsl #2
 .Lres_pdone:
     ldr   w9, [x28, #L_PSIZE]
     ldr   w0, [x28, #L_NPART]
@@ -644,7 +695,7 @@ FUNCL predict
     subs  w5, w5, w4                  // samples to predict
     b.ls  .Lpr_done
     ldr   w0, [x28, #L_FIX]
-    cbnz  w0, .Lpr_fixed
+    cbnz  w0, .Lpr_done               // a fixed predictor was already applied inside decode_residual
     add   x6, x28, #L_COEF
     add   w7, w4, #3
     and   w7, w7, #0xFFFFFFFC         // P = order rounded up to a multiple of 4
@@ -671,22 +722,23 @@ FUNCL predict
     sub   w13, w7, #4                 // the last 4 window slots are handled outside the loop
     ldr   w14, [x28, #L_SHIFT]
 .Lpr_s:
-    mov   x15, #0
     mov   x1, x11
     mov   x2, x6
     mov   w9, w13
-    cbz   w9, .Lpr_tail
-.Lpr_mac:                             // 4 multiply-adds per pass, oldest samples first
-    ldp   w0, w3, [x1], #8
-    ldp   w16, w17, [x2], #8
-    smaddl x15, w0, w16, x15
-    smaddl x15, w3, w17, x15
-    ldp   w0, w3, [x1], #8
-    ldp   w16, w17, [x2], #8
-    smaddl x15, w0, w16, x15
-    smaddl x15, w3, w17, x15
+    cbz   w9, .Lpr_nov                // order <= 4: nothing for the vector loop to do
+    movi  v2.2d, #0
+.Lpr_mac:                             // NEON: 4 taps per pass as two 2-lane signed 32x32 -> 64 multiply-accumulates
+    ld1   {v0.4s}, [x1], #16          // x[j .. j+3]: all at least 4 samples old, so long since stored (no store-forwarding stall)
+    ld1   {v1.4s}, [x2], #16          // the four coefficients (int32, oldest first)
+    smlal v2.2d, v0.2s, v1.2s
+    smlal2 v2.2d, v0.4s, v1.4s
     subs  w9, w9, #4
     b.ne  .Lpr_mac
+    addp  d2, v2.2d
+    fmov  x15, d2                     // the sum of the older taps, exact in 64 bits like the scalar code
+    b     .Lpr_tail
+.Lpr_nov:
+    mov   x15, #0
 .Lpr_tail:                            // x[i-4..i-2] from memory, the newest term from the register
     ldp   w0, w3, [x1]
     ldp   w16, w17, [x2]
@@ -707,9 +759,7 @@ FUNCL predict
     b.ne  .Lpr_s
 .Lpr_done:
     ret
-.Lpr_fixed:                           // fixed predictors: previous samples in registers
-    ldr   x9, [x28, #L_PLANE]
-    add   x10, x9, x4, lsl #2         // &x[order]
+.Lpr_fixed_at:                        // fixed predictors over a region: x10 = &x[start], w5 = count, w0 = order
     cmp   w0, #2
     b.lo  .Lpf1
     b.eq  .Lpf2

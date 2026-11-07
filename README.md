@@ -10,7 +10,7 @@ an audio file into samples, small enough to drop into any program that can call 
 Version **0.5.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
 
 **Branches.** `main` is the assembly and documentation only, at the old x86-64 version 0.1.2. **`dev` (this branch) has the library
-at 0.5.0, identical to `arm64` except for two x86-64 speed experiments in `flac.asm` (fused fixed-predictor decoding and an SSE4.1 LPC loop chosen by `cpuid`; see the CHANGELOG), plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
+at 0.5.0, identical to `arm64` except for two speed experiments in `flac.asm` and `arm64/flac.s` (fused fixed-predictor decoding and a vector LPC loop: SSE4.1 chosen by `cpuid` on x86-64, NEON on ARM64; see the CHANGELOG), plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
 `third_party/`, `tools/`), the audio-quality tests, and the AppImage tooling. `arm64` has all of that and also the 22 language packages
 (`Downloads/`) and their bindings (`bindings/`), which are not on this branch. The earlier x86-64-only documentation is kept at the
 end of each of these files.
@@ -185,7 +185,7 @@ with volume applied. Code size: 9.3 KB for FLAC (9.7 KB on ARM64) against about 
 
 ## Tests
 
-**This is the `dev` branch: it is `main` plus the test suite and its C support files**, with the library identical to the `arm64` branch except for the `flac.asm` experiments described in the CHANGELOG (run `make test-simd` for the SIMD/fallback proof); `arm64` is the unchanged baseline it is compared against. Run it here with `make test` (x86-64) and `make test-arm64 CROSS=aarch64-linux-gnu-` (ARM64, under QEMU).
+**This is the `dev` branch: it is `main` plus the test suite and its C support files**, with the library identical to the `arm64` branch except for the `flac.asm` / `arm64/flac.s` experiments described in the CHANGELOG (run `make test-simd` for the SIMD/fallback proof); `arm64` is the unchanged baseline it is compared against. Run it here with `make test` (x86-64) and `make test-arm64 CROSS=aarch64-linux-gnu-` (ARM64, under QEMU).
 
 `make test` runs all of these (needs `python3` with `numpy`; ffmpeg is not needed):
 

@@ -44,6 +44,17 @@ All notable changes to Liberated Peep.
 - Not done: ARM64 (NEON always present, so no detection needed); LPC fused with residual decoding; faster order-8 prediction, which is where the default-level files
   (24-bit, 96 kHz, level 5) still spend their time. Measured on a shared VM, not an idle machine.
 
+### Experiment (dev branch): both speed changes ported to ARM64 (`arm64/flac.s`)
+- Fused fixed-predictor decoding: the same design as x86-64 (orders 1 to 4 applied inside `decode_residual` with the previous sample in `x15`, older history read back
+  from the plane, escape partitions run the fixed loop over their region only). LPC prediction: the scalar loop is replaced by NEON, four taps per pass as `smlal` and
+  `smlal2` (signed 32x32 to 64-bit multiply-accumulate) over the int32 coefficients, then the newest four taps scalar as before. NEON is mandatory on AArch64, so there is
+  no `cpuid`-style check and no scalar fallback loop; the x86-64 `NOSIMD` option has no ARM64 counterpart.
+- Verified under QEMU only: `make test-arm64` passes (2,504 WAV checks, 120 FLAC streams, 150 corrupted streams, 614 high-resolution and 796 WAV-format checks, 100,000 fuzz
+  inputs), as do the audio tests (320,490 soak checks, 857 signal checks). 11 deliberate breakages of the ported code were caught (a twelfth did not assemble and so
+  was not a valid test).
+- **Not measured:** the speed on ARM64. QEMU timings are meaningless, and the port has never run on real ARM hardware, so whether it is faster, by how much, or at all
+  is unknown. The x86-64 gains (levels 0 and 2, 8 and 12) show the idea works, not that ARM64 will match them.
+
 ### Changed (dev branch)
 - The library files on `dev` (`peep.asm`, `flac.asm`, `wav.asm`, `abi.inc`, `peep.h`, `arm64/`) were replaced by the 0.5.0 versions from the `arm64` branch, with the tools and Makefile that depend on them; the documentation was merged, keeping the old text in an archive section at the end of each file. The old x86-64-only changelog (0.1.0 to 0.1.2) is at the end of this file.
 
