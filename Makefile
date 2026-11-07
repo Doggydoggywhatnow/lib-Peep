@@ -39,3 +39,8 @@ test: $(B)/peepdump $(B)/fuzz $(SEEDDIR)
 fuzz: $(B)/fuzz $(SEEDDIR)
 	for k in 1 2 3 4; do FUZZSEED=$$k $(B)/fuzz 2000000 $(SEEDDIR)/s*.flac & done; wait
 .PHONY: test fuzz
+
+# `make appimage`: Linux AppImage test environment (WAV + native FLAC, no other codecs).
+# Needs appimagetool at build/appimagetool (or APPIMAGETOOL=...).
+appimage:; sh tools/mkappimage.sh
+.PHONY: appimage
