@@ -1,4 +1,4 @@
-; Liberated Peep 0.1.1: Peep's playback kernel. The API is in the README (API reference).
+; Liberated Peep 0.1.2: Peep's playback kernel. The API is in the README (API reference).
 ;
 ; Freestanding: no libc, no malloc, no syscalls, no writable globals.
 ; Assembles for System V (Linux/macOS-style) and Microsoft x64 (-DWIN64).

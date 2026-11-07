@@ -7,9 +7,9 @@ kernel, set free from the player. Peep is a music player that is just a screen;
 Liberated Peep is what is left when you take the screen away: the part that turns
 an audio file into samples, small enough to drop into any program that can call C.
 
-Version **0.1.1**, built from **Peep 0.2.11**.
+Version **0.1.2**, built from **Peep 0.2.11**.
 
-* **5.5 KB of x86-64 assembly** for WAV and FLAC together
+* **9.9 KB of x86-64 assembly** for WAV and FLAC together (4 KB of that is CRC tables)
 * **No libc, no `malloc`, no threads, no system calls, no global state**
 * **You pull the audio**: call `peep_fill` from your audio callback and get stereo samples
 * **You own the memory**: nothing is allocated behind your back
@@ -54,7 +54,7 @@ need `flac.o` at all. Add `ar rcs libpeep.a peep.o flac.o` if you want a static 
 | File | Code size | What |
 |---|---|---|
 | `peep.asm` | 1.3 KB | `peep_open / fill / seek / close`, built-in 16-bit PCM WAV (plain, extensible, odd chunks, unknown length, truncated), volume, channel mapping to stereo |
-| `flac.asm` | 4.2 KB | native FLAC decoder: 4 to 24 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table |
+| `flac.asm` | 8.6 KB | native FLAC decoder: 4 to 24 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table, CRC-16 checked frames (4 KB of the size is the CRC tables) |
 | `abi.inc` | | System V and Microsoft x64 glue, so one source builds for both |
 
 ## API reference
@@ -163,17 +163,21 @@ Decode only, data already in RAM, same machine, against `dr_flac` (the C decoder
 
 | FLAC file | dr_flac | Liberated Peep | |
 |---|---|---|---|
-| level 0 (fixed predictors) | 2027x realtime | 1853x | -9% |
-| level 5 (the usual default) | 1451x | 1459x | +1% |
-| level 8 | 1165x | 1284x | +10% |
-| level 12 | 917x | 1005x | +10% |
-| mono | 2201x | 2544x | +16% |
-| 5.1 | 960x | 1078x | +12% |
-| 96 kHz | 754x | 668x | -11% |
-| 24-bit | 1429x | 1196x | -16% |
+| level 0 (fixed predictors) | 2184x realtime | 1875x | -14% |
+| level 2 | 2358x realtime | 1953x | -17% |
+| level 5 (the usual default) | 1669x realtime | 1523x | -9% |
+| level 8 | 1292x realtime | 1346x | +4% |
+| level 12 | 1043x realtime | 1073x | +3% |
+| mono | 2468x realtime | 2585x | +5% |
+| 5.1 | 1084x realtime | 1098x | +1% |
+| 96 kHz | 831x realtime | 713x | -14% |
+| 24-bit | 1660x realtime | 1248x | -25% |
+
+Liberated Peep checks every frame's CRC-16; this table includes that cost. Measured against the same decoder
+without the check, it costs 4% to 12% (most on lightly compressed files, least on high compression levels).
 
 WAV decodes at about 140,000x realtime at full volume (it is a copy) and about 80,000x
-with volume applied. Code size: 4.2 KB for FLAC against about 90 KB of `dr_flac`.
+with volume applied. Code size: 8.6 KB for FLAC against about 90 KB of `dr_flac`.
 
 ## Limits
 
@@ -182,9 +186,10 @@ with volume applied. Code size: 4.2 KB for FLAC against about 90 KB of `dr_flac`
   need `nasm -f macho64` and underscore-prefixed symbol names, which the sources do not have yet.
 * **FLAC above 24 bits per sample is rejected**, as is a stream whose STREAMINFO block is
   missing or understates the maximum block size.
-* **The FLAC audio CRC-16 is not checked.** Frame headers are CRC-8 checked and a damaged
-  frame is skipped by resynchronising, but a bit flip inside audio data decodes to a wrong
-  sample instead of an error.
+* **A damaged FLAC frame comes out as silence, not as a decoded error.** Every frame's CRC-16 is checked. A
+  frame that fails it is replaced by silence of the same length (so timing and seek positions stay
+  right) and decoding resumes at the next valid frame. A bit flip is never turned into wrong samples.
+  The decoder cannot tell you that it happened: there is no error report yet.
 * Seeking is a binary search over frame headers; a byte pattern that looks like a valid
   header could, very rarely, mislead it.
 * Built-in WAV handles 16-bit PCM only. Other WAV formats need a codec.
@@ -195,10 +200,11 @@ with volume applied. Code size: 4.2 KB for FLAC against about 90 KB of `dr_flac`
 ## Tests
 
 This repository holds only the library (assembly) and its documentation. The test suite, which is written in
-C and Python, is not kept here; it lives in git history and on the `arm64` branch:
+C and Python, is not kept here; it lives on the `dev` branch (this branch plus the tests), on the `arm64`
+branch, and in git history:
 
 ```sh
-git switch arm64          # same x86-64 sources plus the tools; also has the ARM64 port
+git switch dev            # this branch plus the test suite
 make test                 # needs python3 with numpy
 ```
 

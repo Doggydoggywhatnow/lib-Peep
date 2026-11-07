@@ -2,6 +2,30 @@
 
 All notable changes to Liberated Peep.
 
+## 0.1.2
+
+**Built from Peep 0.2.11.** FLAC frames are now integrity-checked.
+
+### Fixed
+- **The FLAC audio CRC-16 was not checked**, so a bit flipped inside audio data silently decoded to a wrong
+  sample. Every frame's CRC-16 (FLAC's polynomial 0x8005, over the frame from its header to the last audio
+  byte) is now verified. A frame that fails is output as silence of the right length, so timing and seek
+  positions stay correct, and decoding resumes at the next valid frame header. (The decoder no longer
+  trusts the damaged frame's own length to find the next frame.)
+
+### Cost
+- The check adds 4% to 12% to FLAC decode time (most on lightly compressed files) and about 4.4 KB of code,
+  almost all of it the eight 512-byte lookup tables, which the assembler itself builds (no generator). It
+  runs 8 bytes per step.
+
+### Tests (they live on the `dev` branch)
+- New `tools/testcrc.py` flips one bit inside the audio, or in the CRC, of a random frame of a generated
+  stream. The only allowed results are that frame silenced or that frame dropped, with every other frame
+  exact. About 3,000 corrupted streams: none produced a wrong sample. It caught a first version of the fix
+  that trusted a damaged frame's length (2 of 400), and a copy of the decoder with the check disabled
+  (106 of 150). Also re-run: the 2,505 WAV checks, 120 FLAC streams with seeks, 6 million more fuzz inputs,
+  valgrind.
+
 ## 0.1.1
 
 **Built from Peep 0.2.11.** The repository is now assembly (and documentation) only. The library is unchanged.
