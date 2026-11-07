@@ -38,6 +38,28 @@ size_t m = peep_fill32(&p, out32, frames);
 peep_seek(&p, frame);  peep_close(&p);
 ```
 
+## Philosophy
+
+**Audio for All.** A decoder should be something you can drop into anything, not something you have to build a
+program around.
+
+* **Small enough to read.** The whole library is about 13 KB of assembly. One person can read all of it, and nothing
+  in it is there "just in case". If a feature costs size, it is a separate codec you opt into: the built-in WAV
+  decoder stays 1.3 KB, and 8/24/32-bit and float WAV, or FLAC, are extra files.
+* **The host is in charge.** Liberated Peep calls no libc, allocates nothing, takes no locks, makes no system calls and
+  keeps no global state. You lend it memory, you pull the samples, you decide the thread. That is why it runs in
+  an audio callback, a kernel, a plug-in host that forbids allocation, or a runtime nobody has heard of.
+* **True to the file.** Samples are never changed behind your back. `peep_fill32` hands over every bit of a 24-bit file;
+  the 16-bit path only rounds once, at the very end, and only if you ask for rounding or dither. Volume is applied at full
+  precision before that step. A damaged FLAC frame becomes silence, never a plausible wrong sample, and it is counted.
+* **Assembly, on purpose.** Not for speed's sake (it is within a few percent of the C decoders it replaces), but because
+  assembly is the one language every other language can call without a runtime. It stays pure assembly.
+* **Claims are checked, and the checking is checked.** Every decoder is compared with an independent model or an encoder
+  that knows the exact answer, then deliberately broken to prove the tests would notice. When something has not been
+  verified (real ARM hardware, macOS, Windows beyond Wine, the speed of the ARM64 port) this README says so.
+* **Everywhere it can go.** x86-64 and ARM64 with the same design, the same API and the same tests, and a ready-made
+  package for 22 languages. If your CPU or language is missing, the C ABI is five functions.
+
 ## Build
 
 On x86-64 you need `nasm` and a linker. On ARM64 you need only the GNU assembler (`as`) and a linker.
