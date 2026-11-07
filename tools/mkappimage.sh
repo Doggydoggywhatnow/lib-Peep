@@ -1,11 +1,13 @@
 #!/bin/sh
-# Build build/libpeep-test-x86_64.AppImage: a drag-and-drop player (tools/peepplay.c) plus the
+# Build $OUT: a drag-and-drop player (tools/peepplay.c) plus the
 # command-line self test (tools/peeptest.c). Codecs: built-in WAV + native FLAC only.
 # Needs: nasm, gcc, SDL2 dev files (libsdl2-dev), and appimagetool at build/appimagetool
 # (or APPIMAGETOOL=/path/to/it). SDL2 is bundled into the AppImage.
 set -e
 cd "$(dirname "$0")/.."
 make build/libpeep.a >/dev/null
+VER=$(sed -n 's/.*LIBPEEP_VERSION "\(.*\)".*/\1/p' peep.h)
+OUT=${OUT:-build/libpeep-$VER-dropplayer-x86_64.AppImage}
 gcc -O2 -o build/peeptest tools/peeptest.c build/libpeep.a -lm
 gcc -O2 -o build/peepplay tools/peepplay.c build/libpeep.a $(pkg-config --cflags --libs sdl2)
 A=build/AppDir; rm -rf $A; mkdir -p $A/usr/bin $A/usr/lib
@@ -37,5 +39,5 @@ X
 printf '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#246"/><path d="M8 32h8l4-16 8 32 8-24 6 16h14" stroke="#fff" fill="none" stroke-width="3"/></svg>' > $A/libpeep-test.svg
 TOOL=${APPIMAGETOOL:-build/appimagetool}
 [ -x "$TOOL" ] || { echo "appimagetool not found at $TOOL (see https://github.com/AppImage/appimagetool/releases)"; exit 1; }
-ARCH=x86_64 "$TOOL" --appimage-extract-and-run --no-appstream $A build/libpeep-test-x86_64.AppImage
-echo built build/libpeep-test-x86_64.AppImage
+ARCH=x86_64 "$TOOL" --appimage-extract-and-run --no-appstream $A $OUT
+echo built $OUT
