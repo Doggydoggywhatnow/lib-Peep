@@ -525,6 +525,8 @@ ff_scan:
     cmp  r14d, 32
     jb   %%rf1
 %%c1:
+    xor  eax, eax                     ; breaks bsr's false dependency on rax: bsr leaves its destination unchanged for a zero source, so the CPU treats the old rax
+                                      ; as an input, which would chain this sample's bit scan to the previous sample's value and prediction (found by measurement)
     bsr  rax, r13                     ; unary part: leading zero bits
     jz   %%long
     xor  eax, 63                      ; q

@@ -66,6 +66,13 @@ All notable changes to Liberated Peep.
   slower, and wrong). None closes the gap and the cause of the loop's low instruction rate is still unknown; finding it needs hardware performance counters, which this VM does not provide.
 
 
+### Experiment (dev branch): one instruction removes a false dependency in the Rice loop, x86-64 only
+- `flac.asm`: `xor eax, eax` before `bsr rax, r13` in the residual loop. `bsr` leaves its destination unchanged when its source is zero, so the CPU treats the old `rax` as an input; `rax` held the
+  previous sample's zig-zag or prediction result, which chained each sample's bit scan to the last sample's value and stopped the bit reader and the predictor overlapping. The zeroing idiom breaks the chain.
+  Found by measurement after four guesses about the loop (BMI2 shifts, a branch-free refill, a bit-position reader, a 56-bit refill) had each gained little or nothing. ARM64 needs nothing: `clz` has no such input.
+- Measured against the build just before it (same machine, alternating runs, min of 7): levels 0 and 2 **+21 to +23%** (now **12 to 14% faster than `dr_flac`**, from 8 to 10% slower), level 5 +5%, 96 kHz +4%,
+  level 8 +8%, 24-bit +5% (still about **10% slower than `dr_flac`**), mono unchanged. Output is identical; `make test` passes in full (200,000 fuzz inputs, the audio suite, `make test-simd`).
+
 ### Added (dev branch): compressed WAV codec, `peep_codec_wavc`
 - `wavc.asm` and `arm64/wavc.s` (about 2.5 KB each), pure assembly: **A-law** (tag 6) and **mu-law** (tag 7), 1 to 8 channels, plain or extensible headers;
   **IMA ADPCM** (0x11) and **Microsoft ADPCM** (2), mono or stereo. Output is 16-bit (`p->bits` = 16, `read32` is each sample << 16). ADPCM needs an 80-byte workspace
