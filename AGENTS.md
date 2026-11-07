@@ -141,11 +141,9 @@ typedef struct peep_codec {
 * The `peep` struct layout is written in **three places that must agree**: the C declarations in the
   "API reference" of `README.md`, the `P_*` constants at the top of `peep.asm`, and the `P_*` / `S_*`
   constants at the top of `flac.asm`. Change one, change all, then run the tests.
-* **The test suite is not on this branch** (it is C and Python; this branch is assembly only). Get it with
-  `git switch arm64` (same x86-64 sources plus the tools) and run `make test` (needs `python3` with
-  `numpy`) and, after touching `flac.asm`, `make fuzz`; or check it out here with
-  `git checkout 7c347e6 -- tools Makefile peep.h examples third_party`. Do not commit those files back
-  to this branch. Windows changes can be checked under Wine with `make build/peepdump.exe`.
+* **This is the `dev` branch: it has the test suite** (`main` is assembly only). Run `make test` (needs `python3`
+  with `numpy`) after every change and, after touching `flac.asm`, `make fuzz`. Windows changes can be checked
+  under Wine with `make build/peepdump.exe`. Keep the tests on `dev`; `main` must stay assembly only.
 * A decoder is only correct if it matches ground truth. `tools/mkflac.py` is the oracle for FLAC: it
   knows the exact PCM it encoded. A good habit is to break the decoder on purpose and confirm the
   tests fail.

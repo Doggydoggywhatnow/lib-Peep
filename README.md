@@ -194,15 +194,14 @@ with volume applied. Code size: 4.2 KB for FLAC against about 90 KB of `dr_flac`
 
 ## Tests
 
-This repository holds only the library (assembly) and its documentation. The test suite, which is written in
-C and Python, is not kept here; it lives in git history and on the `arm64` branch:
+**This is the `dev` branch: it is `main` plus the test suite and its C support files** (`peep.h`, `Makefile`,
+`examples/`, `third_party/`, `tools/`). `main` is assembly only. Run the suite here:
 
 ```sh
-git switch arm64          # same x86-64 sources plus the tools; also has the ARM64 port
-make test                 # needs python3 with numpy
+make test                 # needs python3 with numpy; ffmpeg is not needed
 ```
 
-(or `git checkout 7c347e6 -- tools Makefile peep.h examples third_party` on this branch). It contains:
+It contains:
 
 * `tools/mkflac.py`: a randomised FLAC **encoder** that uses every feature of the format and
   knows the exact PCM it wrote, so the decoder is checked against ground truth (all 11

@@ -2,6 +2,11 @@
 
 All notable changes to Liberated Peep.
 
+## 0.1.1 (dev branch)
+
+The `dev` branch is `main` at 0.1.1 plus the test suite (`tools/`, `Makefile`, `peep.h`, `examples/`,
+`third_party/`) restored from commit `7c347e6`. The assembly is identical to `main`.
+
 ## 0.1.1
 
 **Built from Peep 0.2.11.** The repository is now assembly (and documentation) only. The library is unchanged.
