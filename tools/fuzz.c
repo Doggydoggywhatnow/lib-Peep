@@ -60,10 +60,12 @@ int main(int argc, char **argv)
             ok = peep_open(&p, codecs, b, n, work, ws);
         }
         if (ok) {
-            opened++; peep_set_gain(&p, rnd() % 300);
+            opened++; peep_set_gain(&p, rnd() % 300); peep_set_dither(&p, rnd() % 4);
+            { const void *d = 0; size_t len = peep_flac_metadata(&p, rnd() % 9, rnd() % 3, &d);
+              if (len != (size_t)-1 && d && len) { volatile unsigned char t = ((const unsigned char *)d)[0]; t += ((const unsigned char *)d)[len - 1]; (void)t; } }
             for (int k = 0; k < 8; k++) {
                 if (rnd() % 3 == 0) peep_seek(&p, ((unsigned long long)rnd() << (rnd() % 24)) % (p.total + 7));
-                size_t want = 1 + rnd() % 4096, got = peep_fill(&p, out, want);
+                size_t want = 1 + rnd() % 4096, got = (rnd() & 1) ? peep_fill32(&p, (int32_t *)out, want) : peep_fill(&p, out, want);
                 if (got > want) { printf("peep_fill returned %zu > %zu\n", got, want); return 1; }
                 frames_out += got; if (got) played++;
             }

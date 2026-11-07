@@ -25,16 +25,17 @@ for n in range(a.run):
     pos = off + rng.randrange(hdr, length)                  # audio payload or the CRC itself
     bit = rng.randrange(8)
     bad_data = bytearray(data); bad_data[pos] ^= 1 << bit
-    rc, out, _ = mkflac.run(a.tool, bytes(bad_data), rng.choice([1, 100, 1024, 99999]))
+    rc, out, err = mkflac.run(a.tool, bytes(bad_data), rng.choice([1, 100, 1024, 99999]), extra=['-E'])
+    errs = int(err.split(b'errors=')[1].split()[0]) if b'errors=' in err else -1
     n_cases += 1
     silent = exp.copy(); silent[start:start + cnt] = 0
     drop = np.delete(exp, np.s_[start:start + cnt], axis=0)
-    if rc == 0 and out == silent.tobytes(): silenced += 1
-    elif rc == 0 and out == drop.tobytes(): dropped += 1
+    if rc == 0 and out == silent.tobytes() and errs >= 1: silenced += 1
+    elif rc == 0 and out == drop.tobytes() and errs >= 1: dropped += 1
     else:
         bad += 1
         got = np.frombuffer(out, dtype='<i2').reshape(-1, 2) if len(out) % 4 == 0 else None
         print(f'FAIL case {n}: frame {f} of {len(info["frame_meta"])} byte {pos - off} bit {bit}: '
-              f'rc={rc} frames_out={len(out)//4} expected {len(exp)} (or {len(drop)})')
-print(f'{n_cases} corrupted streams: {silenced} silenced by the CRC-16, {dropped} dropped by resync, {bad} wrong')
+              f'errors={errs} rc={rc} frames_out={len(out)//4} expected {len(exp)} (or {len(drop)})')
+print(f'{n_cases} corrupted streams: {silenced} silenced by the CRC-16, {dropped} dropped by resync (both counted in p->errors), {bad} wrong')
 sys.exit(1 if bad else 0)

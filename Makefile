@@ -43,6 +43,7 @@ test: $(B)/peepdump $(B)/fuzz $(SEEDDIR)
 	python3 tools/testwav.py $(B)/peepdump
 	python3 tools/mkflac.py --run 120 --seed 1 --tool $(B)/peepdump
 	python3 tools/testcrc.py --run 300 --seed 1 --tool $(B)/peepdump
+	python3 tools/testhires.py --run 120 --seed 1 --tool $(B)/peepdump
 	$(B)/fuzz 200000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac
 fuzz: $(B)/fuzz $(SEEDDIR)
 	for k in 1 2 3 4; do FUZZSEED=$$k $(B)/fuzz 2000000 $(SEEDDIR)/s*.flac & done; wait
@@ -79,5 +80,6 @@ test-arm64: $(B)/run_a64.sh $(B)/fuzz_a64 $(SEEDDIR)
 	python3 tools/testwav.py $(B)/run_a64.sh
 	python3 tools/mkflac.py --run 120 --seed 1 --tool $(B)/run_a64.sh
 	python3 tools/testcrc.py --run 150 --seed 1 --tool $(B)/run_a64.sh
+	python3 tools/testhires.py --run 60 --seed 1 --tool $(B)/run_a64.sh
 	$(QEMU) $(B)/fuzz_a64 100000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac
 .PHONY: arm64 test-arm64
