@@ -51,6 +51,182 @@ C ABI below through its FFI. Every FFI can use these five functions: `peep_open`
 `peep_close` and `peep_flac()` (returns the FLAC codec table's address, so you never need to read a data
 symbol). Build a shared library first (`build.sh` shows how). Only Linux x86-64 was tested for the bindings.
 
+## Using it from assembly (no C header at all)
+
+The library itself contains no C: `peep.h` is only a description of the API for C programs, and nothing in the `.asm`
+or `.s` files includes it (three comments mention its name, nothing more). If your program is written in assembly, you do not need it, and you do not need a C compiler
+or libc either (a static `ld` link works; see the two programs below, which were built and run on both CPUs).
+
+**Keep** (copy these into your project):
+
+| CPU | Required | Optional |
+|---|---|---|
+| x86-64 | `peep.asm`, `abi.inc` | `flac.asm` (FLAC), `wav.asm` (8/12/20/24/32-bit and float WAV) |
+| ARM64 | `arm64/peep.s`, `arm64/abi_a64.inc` | `arm64/flac.s` (FLAC), `arm64/wav.s` (8/12/20/24/32-bit and float WAV) |
+
+**Remove** (all of it is C, Python or packaging, and none of it is used by the library):
+
+* `peep.h`: the one C header. Its job is taken over by the table below.
+* `examples/` and `third_party/`: the `dr_flac` adapter and `dr_flac.h` (C).
+* `tools/`: the test programs (`*.c`) and generators (`*.py`).
+* `bindings/` and `Downloads/`: the language packages and their bindings.
+* `Makefile`: optional. Its default target (`make`, then `build/libpeep.a`) uses only `nasm`/`as` and `ar`, but the test targets
+  need `cc` and Python, so a pure-assembly project usually builds the files itself.
+
+The C header was also one of the five places that hold the `peep` layout (see "If you modify this repository"). Without it
+there are four, and only `peep.asm`/`flac.asm` (x86-64) and `arm64/abi_a64.inc`/`arm64/flac.s` (ARM64) still carry it.
+
+**What replaces `peep.h`.** The calls use the platform C ABI, so from assembly you just follow it (System V: `rdi rsi rdx rcx r8 r9`;
+Windows x64: `rcx rdx r8 r9` then the stack; AArch64: `x0` to `x5`). Result in `rax` / `x0`.
+
+| Symbol | Arguments | Result |
+|---|---|---|
+| `peep_open` | `p`, `codecs`, `data`, `len`, `work`, `work_size` | 1 = ok |
+| `peep_fill` / `peep_fill32` | `p`, `out`, `frames` | frames written, 0 = end |
+| `peep_seek` | `p`, `frame` | |
+| `peep_close` | `p` | |
+| `peep_flac_metadata` | `p`, `type`, `index`, `&data` | length, or -1 |
+| `peep_flac` / `peep_wavx` | none | address of that codec table |
+
+`peep_codec_flac` and `peep_codec_wavx` are the same tables as data symbols (fine in a static link; use the functions in a shared
+library). `codecs` is a NULL-terminated array of table addresses, or NULL for the built-in 16-bit WAV only.
+
+`struct peep` is 160 bytes that you reserve (aligned to 8; read freely, write only `gain` and `dither`):
+
+| Offset | Size | Field | | Offset | Size | Field |
+|---|---|---|---|---|---|---|
+| 0 | 8 | codec | | 52 | 4 | kind (0 closed, 1 WAV, 2 codec) |
+| 8 | 8 | src | | 56 | 8 | data |
+| 16 | 8 | len | | 64 | 8 | ctx |
+| 24 | 8 | pos (frames) | | 72 | 56 | state |
+| 32 | 8 | total (frames, 0 = unknown) | | 128 | 8 | work |
+| 40 | 4 | rate (Hz) | | 136 | 8 | work_size |
+| 44 | 4 | channels | | 144 | 8 | work_need (valid after a failed open) |
+| 48 | 4 | gain (q8, 0 to 256) | | 152 | 4 | errors |
+| 156 | 2 | dither (0 to 2) | | 158 | 2 | bits |
+
+`peep_set_gain` and `peep_set_dither` are C inline functions, so in assembly write the fields yourself: `gain` is a 32-bit
+value you must keep at 256 or below, `dither` a 16-bit value of 0, 1 or 2. A codec table (for writing your own codec) is five
+8-byte pointers: `open`, `read`, `seek`, `close` (0 allowed), `read32` (0 allowed).
+
+**Build and link** with no C toolchain (`-I` is needed so the assembler finds `abi.inc` / `abi_a64.inc`):
+
+```sh
+nasm -I path/to/lib-peep/ -f elf64 path/to/lib-peep/peep.asm -o peep.o        # x86-64 (add flac.asm, wav.asm if you want them)
+nasm -f elf64 host.asm -o host.o && ld -o host host.o peep.o
+
+as -I path/to/lib-peep/arm64 path/to/lib-peep/arm64/peep.s -o peep.o          # ARM64
+as host.s -o host.o && ld -o host host.o peep.o
+```
+
+A complete host, x86-64 Linux (decodes a 16-bit WAV built into the program and writes the samples to standard output; the libc-free
+`_start` and the `syscall`s are only for the demo, your program has its own):
+
+```nasm
+default rel
+global _start
+extern peep_open, peep_fill, peep_close
+section .rodata
+wav:     incbin "t.wav"
+wav_end:
+section .bss
+p:       resb 160                 ; struct peep
+out:     resb 4096
+section .text
+_start:
+    lea  rdi, [p]
+    xor  esi, esi                 ; no extra codecs: 16-bit WAV is built in
+    lea  rdx, [wav]
+    mov  ecx, wav_end - wav
+    xor  r8d, r8d                 ; no workspace
+    xor  r9d, r9d
+    call peep_open
+    test eax, eax
+    jz   .bad
+.l: lea  rdi, [p]
+    lea  rsi, [out]
+    mov  edx, 1024
+    call peep_fill
+    test rax, rax
+    jz   .done
+    mov  rdx, rax
+    shl  rdx, 2                   ; 4 bytes per stereo frame
+    mov  edi, 1
+    lea  rsi, [out]
+    mov  eax, 1                   ; write(1, out, n)
+    syscall
+    jmp  .l
+.done:
+    lea  rdi, [p]
+    call peep_close
+    xor  edi, edi
+    mov  eax, 60                  ; exit(0)
+    syscall
+.bad:
+    mov  edi, 1
+    mov  eax, 60
+    syscall
+section .note.GNU-stack noalloc noexec nowrite progbits
+```
+
+The same host, ARM64 Linux:
+
+```asm
+    .global _start
+    .extern peep_open, peep_fill, peep_close
+    .section .rodata
+    .balign 8
+wav:    .incbin "t.wav"
+wav_end:
+    .balign 8
+wavlen: .quad wav_end - wav
+    .bss
+    .balign 16
+p:      .skip 160                 // struct peep
+out:    .skip 4096
+    .text
+_start:
+    adrp x0, p
+    add  x0, x0, :lo12:p
+    mov  x1, #0                   // no extra codecs: 16-bit WAV is built in
+    adrp x2, wav
+    add  x2, x2, :lo12:wav
+    adrp x3, wavlen
+    ldr  x3, [x3, :lo12:wavlen]
+    mov  x4, #0                   // no workspace
+    mov  x5, #0
+    bl   peep_open
+    cbz  w0, bad
+1:  adrp x0, p
+    add  x0, x0, :lo12:p
+    adrp x1, out
+    add  x1, x1, :lo12:out
+    mov  x2, #1024
+    bl   peep_fill
+    cbz  x0, 2f
+    lsl  x2, x0, #2               // 4 bytes per stereo frame
+    mov  x0, #1
+    adrp x1, out
+    add  x1, x1, :lo12:out
+    mov  x8, #64                  // write(1, out, n)
+    svc  #0
+    b    1b
+2:  adrp x0, p
+    add  x0, x0, :lo12:p
+    bl   peep_close
+    mov  x0, #0
+    mov  x8, #93                  // exit(0)
+    svc  #0
+bad:
+    mov  x0, #1
+    mov  x8, #93
+    svc  #0
+```
+
+Verified: both programs were assembled with `nasm`/`as` and linked with `ld` only (no `cc`, no libc, a static executable) and their output was
+byte-for-byte what the C test tool produces for the same file, on x86-64 and on ARM64 (under QEMU). Not tested: an assembly host on
+Windows x64 (the ABI is the Microsoft one, handled by `abi.inc`), on macOS, or on real ARM hardware. Keep `bytes` alive until `peep_close`, as always.
+
 ## The whole API (`peep.h`)
 
 ```c
