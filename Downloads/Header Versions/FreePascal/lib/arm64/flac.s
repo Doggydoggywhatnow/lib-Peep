@@ -4,7 +4,9 @@
 //   * freestanding: no libc, no malloc, no syscalls, no writable globals
 //   * workspace lent by the host: channels * max_blocksize * 4 + 16 bytes
 //     (16 of them in front of the first plane)
-//   * 4..24 bits per sample, 1..8 channels, fixed and variable block sizes, all subframe
+//   * ID3v2 tags in front of the stream are skipped; damaged frames are counted in p->errors;
+//     read32() gives the samples at full resolution; peep_flac_metadata() hands out metadata blocks
+//   * 4..31 bits per sample, 1..8 channels, fixed and variable block sizes, all subframe
 //     types, every Rice mode, all stereo modes, seeking by binary search over frame headers,
 //     resynchronisation over damaged frames
 //   * every frame's CRC-16 is verified; a frame that fails it is output as silence of the right
@@ -61,6 +63,8 @@
 .equ L_MID,    416
 .equ L_FIX,    424                    // order of a fixed predictor, 0 for LPC
 .equ L_CRC,    432                    // the CRC-16 stored in the frame
+.equ L_WIDE,   440                    // 0: read() int16, 1: read32() int32
+.equ P_CTX,    64                     // where the metadata blocks start (for peep_flac_metadata)
 
     .text
 
@@ -1085,6 +1089,9 @@ FUNCL decode_body
     cmp   w0, w1
     b.eq  .Lb_crcok
     bl    silence_block               // damaged: silence of the right length, not wrong samples
+    ldr   w0, [x19, #P_ERRS]
+    add   w0, w0, #1
+    str   w0, [x19, #P_ERRS]
     ldr   x0, [x28, #L_HSTART]        // the length it claimed cannot be trusted either: look for the
     add   x0, x0, #1                  // next valid frame header from just after this one's first byte
     str   x0, [x19, #S_NEXT]
@@ -1127,7 +1134,12 @@ FUNCL decode_next
     b     .Ldn_retry
 .Ldn_body:
     bl    decode_body
-    cbz   w0, .Ldn_resync
+    cbnz  w0, .Ldn_ok
+    ldr   w0, [x19, #P_ERRS]          // a frame that could not be decoded
+    add   w0, w0, #1
+    str   w0, [x19, #P_ERRS]
+    b     .Ldn_resync
+.Ldn_ok:
     mov   w0, #1
     ldr   x30, [sp], #16
     ret
@@ -1138,6 +1150,84 @@ FUNCL decode_next
     str   wzr, [x19, #S_BLKPOS]
     mov   w0, #0
     ldr   x30, [sp], #16
+    ret
+
+// interleave32: w0 = frames to hand out from the decoded block, to L_OUT as int32, each sample
+// left-justified: value << (32 - bps). Clobbers x0-x16, v0-v6.
+FUNCL interleave32
+    mov   w4, w0
+    ldr   w5, [x19, #P_CH]
+    ldr   w0, [x19, #S_BPS]
+    mov   w1, #32
+    sub   w6, w1, w0                  // left shift
+    dup   v6.4s, w6
+    ldr   w9, [x19, #S_BLKPOS]
+    ldr   x10, [x19, #S_PLANE0]
+    ldr   w11, [x19, #S_MAXBLK]
+    cmp   w5, #2
+    b.ne  .Li3_gen
+    add   x12, x10, x9, lsl #2
+    add   x13, x10, x11, lsl #2
+    add   x13, x13, x9, lsl #2
+    ldr   x14, [x28, #L_OUT]
+    lsr   w15, w4, #2
+    cbz   w15, .Li3_tail
+.Li3_v:
+    ld1   {v0.4s}, [x12], #16
+    ld1   {v1.4s}, [x13], #16
+    sshl  v0.4s, v0.4s, v6.4s
+    sshl  v1.4s, v1.4s, v6.4s
+    st2   {v0.4s, v1.4s}, [x14], #32
+    subs  w15, w15, #1
+    b.ne  .Li3_v
+.Li3_tail:
+    ands  w15, w4, #3
+    b.eq  .Li3_done
+.Li3_t:
+    ldr   w0, [x12], #4
+    lsl   w0, w0, w6
+    str   w0, [x14], #4
+    ldr   w0, [x13], #4
+    lsl   w0, w0, w6
+    str   w0, [x14], #4
+    subs  w15, w15, #1
+    b.ne  .Li3_t
+    b     .Li3_done
+.Li3_gen:
+    mov   w15, #0
+    lsl   x16, x5, #2                 // output bytes per frame
+.Li3_gc:
+    mul   w0, w11, w15
+    add   x0, x0, x9
+    add   x1, x10, x0, lsl #2
+    ldr   x2, [x28, #L_OUT]
+    add   x2, x2, x15, lsl #2
+    mov   w3, w4
+.Li3_gl:
+    ldr   w0, [x1], #4
+    lsl   w0, w0, w6
+    str   w0, [x2]
+    add   x2, x2, x16
+    subs  w3, w3, #1
+    b.ne  .Li3_gl
+    add   w15, w15, #1
+    cmp   w15, w5
+    b.lo  .Li3_gc
+.Li3_done:
+    ldr   w0, [x19, #S_BLKPOS]
+    add   w0, w0, w4
+    str   w0, [x19, #S_BLKPOS]
+    ldr   x0, [x28, #L_FRAMES]
+    sub   x0, x0, x4
+    str   x0, [x28, #L_FRAMES]
+    ldr   x0, [x28, #L_GOT]
+    add   x0, x0, x4
+    str   x0, [x28, #L_GOT]
+    mul   x1, x4, x5
+    lsl   x1, x1, #2
+    ldr   x0, [x28, #L_OUT]
+    add   x0, x0, x1
+    str   x0, [x28, #L_OUT]
     ret
 
 // interleave: w0 = frames to hand out from the decoded block, to L_OUT.
@@ -1236,6 +1326,40 @@ FUNCL flac_open
     mov   x9, x0
     mov   x10, x1
     mov   x11, x2
+    mov   x12, #0                     // bytes of ID3v2 tag(s) in front of the stream
+.Lfo_id3:
+    cmp   x11, #52
+    b.lo  .Lfo_noid3
+    ldr   w3, [x10]
+    and   w3, w3, #0xFFFFFF
+    MOV32 w4, 0x334449                // 'ID3'
+    cmp   w3, w4
+    b.ne  .Lfo_noid3
+    ldr   w3, [x10, #6]               // four 7-bit size bytes
+    MOV32 w4, 0x80808080
+    tst   w3, w4
+    b.ne  .Lfo_noid3
+    rev   w3, w3
+    and   w4, w3, #0x7F
+    ubfx  w5, w3, #8, #7
+    orr   w4, w4, w5, lsl #7
+    ubfx  w5, w3, #16, #7
+    orr   w4, w4, w5, lsl #14
+    lsr   w5, w3, #24
+    orr   w4, w4, w5, lsl #21
+    add   x4, x4, #10
+    ldrb  w5, [x10, #5]
+    tbz   w5, #4, .Lfo_nofoot         // footer present: 10 more bytes
+    add   x4, x4, #10
+.Lfo_nofoot:
+    add   x5, x4, #42
+    cmp   x5, x11
+    b.hi  .Lfo_noid3
+    add   x10, x10, x4
+    sub   x11, x11, x4
+    add   x12, x12, x4
+    b     .Lfo_id3
+.Lfo_noid3:
     cmp   x11, #42
     b.lo  .Lfo_fail
     ldr   w3, [x10]
@@ -1270,9 +1394,10 @@ FUNCL flac_open
     add   w4, w4, #1
     cmp   w4, #4
     b.lo  .Lfo_fail
-    cmp   w4, #24
+    cmp   w4, #31
     b.hi  .Lfo_fail
     str   w4, [x9, #S_SIBPS]
+    strh  w4, [x9, #P_BITS]           // the source's bit depth, for the caller
     ubfx  x4, x3, #0, #36
     str   x4, [x9, #P_TOTAL]
     mov   x5, #4                      // skip metadata blocks
@@ -1301,8 +1426,11 @@ FUNCL flac_open
     ldr   x8, [x9, #P_WSIZE]
     cmp   x8, x6
     b.lo  .Lfo_fail
+    add   x5, x5, x12                 // offsets are from the start of the file, ID3 included
     str   x5, [x9, #S_NEXT]
     str   x5, [x9, #S_START]
+    add   x12, x12, #4
+    str   x12, [x9, #P_CTX]
     add   x7, x7, #16
     str   x7, [x9, #S_PLANE0]
     mov   w0, #1
@@ -1313,7 +1441,15 @@ FUNCL flac_open
 
 // size_t read(peep *p, int16_t *out, size_t frames)
 FUNCL flac_read
+    mov   w3, #0
+    b     .Lfr_go
+
+// size_t read32(peep *p, int32_t *out, size_t frames): every sample left-justified (<< 32 - bits)
+FUNCL flac_read32
+    mov   w3, #1
+.Lfr_go:
     ENTER
+    str   w3, [x28, #L_WIDE]
     mov   x19, x0
     str   x1, [x28, #L_OUT]
     str   x2, [x28, #L_FRAMES]
@@ -1332,7 +1468,12 @@ FUNCL flac_read
     ldr   x0, [x28, #L_FRAMES]
     cmp   x1, x0
     csel  x0, x1, x0, lo
+    ldr   w3, [x28, #L_WIDE]
+    cbnz  w3, .Lfr_w32
     bl    interleave
+    b     .Lfr_loop
+.Lfr_w32:
+    bl    interleave32
     b     .Lfr_loop
 .Lfr_done:
     ldr   x0, [x28, #L_GOT]
@@ -1393,6 +1534,63 @@ FUNCL flac_seek
 .Lsk_r:
     LEAVE
 
+// size_t peep_flac_metadata(peep *p, int type, int index, const void **data)
+// Zero-copy access to the index-th metadata block of the given type of a file opened through
+// peep_codec_flac. Returns the block's length and stores its address in *data (may be NULL),
+// or (size_t)-1 when there is no such block or p is not a FLAC file.
+FUNC peep_flac_metadata
+    stp   x29, x30, [sp, #-32]!
+    mov   x29, sp
+    stp   x19, x20, [sp, #16]
+    mov   x19, x0
+    mov   x20, x3
+    ldr   w4, [x19, #P_KIND]
+    cmp   w4, #2
+    b.ne  .Lmd_no
+    stp   x1, x2, [sp, #-16]!
+    bl    .L_peep_flac
+    ldp   x1, x2, [sp], #16
+    ldr   x4, [x19, #P_CODEC]
+    cmp   x0, x4
+    b.ne  .Lmd_no
+    ldr   x4, [x19, #P_CTX]           // offset of the first block header
+    ldr   x5, [x19, #P_SRC]
+    ldr   x6, [x19, #P_LEN]
+.Lmd_blk:
+    add   x7, x4, #4
+    cmp   x7, x6
+    b.hi  .Lmd_no
+    ldr   w8, [x5, x4]
+    rev   w8, w8
+    and   w9, w8, #0xFFFFFF           // length
+    lsr   w10, w8, #24                // last-flag | type
+    add   x11, x4, #4                 // body
+    add   x12, x11, x9                // end of body
+    cmp   x12, x6
+    b.hi  .Lmd_no
+    and   w13, w10, #0x7F
+    cmp   w13, w1
+    b.ne  .Lmd_next
+    cbz   w2, .Lmd_hit
+    sub   w2, w2, #1
+.Lmd_next:
+    tbnz  w10, #7, .Lmd_no
+    mov   x4, x12
+    b     .Lmd_blk
+.Lmd_hit:
+    cbz   x20, .Lmd_hz
+    add   x13, x5, x11
+    str   x13, [x20]
+.Lmd_hz:
+    mov   x0, x9
+    b     .Lmd_ret
+.Lmd_no:
+    mov   x0, #-1
+.Lmd_ret:
+    ldp   x19, x20, [sp, #16]
+    ldp   x29, x30, [sp], #32
+    ret
+
 // const peep_codec *peep_flac(void): the codec table's address, for languages whose FFI can
 // import functions but not data symbols. Position independent (works in a shared library).
 FUNC peep_flac
@@ -1415,6 +1613,6 @@ _peep_codec_flac:
     .type peep_codec_flac, %object
 peep_codec_flac:
 .endif
-    .quad flac_open, flac_read, flac_seek, 0
+    .quad flac_open, flac_read, flac_seek, 0, flac_read32
 
 NO_EXEC_STACK

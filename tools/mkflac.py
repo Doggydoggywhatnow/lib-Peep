@@ -247,9 +247,9 @@ def make_id3(rng):
     """One or two ID3v2 tags with random payloads (some with a footer)."""
     out = b''
     for _ in range(rng.choice([1, 1, 2])):
-        n = rng.choice([0, 1, 100, 1000, 3000]); footer = rng.random() < .3
+        n = rng.choice([0, 1, 100, 1000, 3000, 20000] + [2200000] * (rng.random() < .05)); footer = rng.random() < .3
         size = bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F])
-        out += b'ID3' + bytes([4 if footer else 3, 0, 0x10 if footer else 0]) + size + bytes(rng.randrange(256) for _ in range(n))
+        out += b'ID3' + bytes([4 if footer else 3, 0, 0x10 if footer else 0]) + size + (bytes(n) if n > 5000 else bytes(rng.randrange(256) for _ in range(n)))
         if footer: out += b'3DI' + bytes([4, 0, 0x10]) + size
     return out
 

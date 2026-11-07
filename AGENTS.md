@@ -1,6 +1,6 @@
 # AGENTS.md: using Liberated Peep (lib-Peep) in a project
 
-For AI coding agents. Liberated Peep ("Audio for All", version 0.3.1, built from Peep
+For AI coding agents. Liberated Peep ("Audio for All", version 0.4.0, built from Peep
 0.2.11) is a tiny audio-decoding library: you give it the bytes of a WAV or FLAC file and it
 hands back stereo 16-bit samples, on demand. It plays nothing by itself; your program sends
 the samples to a sound device.
@@ -11,7 +11,7 @@ the samples to a sound device.
 |---|---|
 | the target is x86-64 (Linux, BSD, Windows) or ARM64 Linux (Raspberry Pi, ARM servers) | the target is 32-bit ARM, RISC-V or any other CPU: there is no port |
 | you need WAV or FLAC and want no dependencies | you need MP3, Ogg Vorbis, AAC or Opus (not included; see "Other formats") |
-| the audio thread must not allocate, lock or call the OS | you need FLAC above 24 bits per sample |
+| the audio thread must not allocate, lock or call the OS | you need 32-bit FLAC (up to 31 bits works) |
 | you want a very small binary, or are embedding in an unusual runtime | you need resampling, mixing, EQ or effects (this is a decoder only) |
 
 ## Add it to a project
@@ -74,7 +74,13 @@ Rules that matter:
 
 * **Keep `bytes` alive until `peep_close`.** The library reads straight from your memory and
   copies nothing. `mmap` of the file is ideal. The same goes for `work`.
-* **Output is always interleaved stereo `int16` at `p.rate`**, the file's own sample rate.
+* **`peep_fill32(&p, out32, frames)`** is the full-resolution alternative: interleaved stereo `int32`, each sample
+  left-justified (`value << (32 - bits)`), volume at 64-bit precision, no rounding. Use it for 24-bit devices or your own
+  mixer. For a 16-bit device fed from a >16-bit file, call `peep_set_dither(&p, 2)` (TPDF) or `1` (round); the default `0`
+  truncates. `p.bits` is the source depth, `p.errors` the damaged frames met so far.
+* `peep_flac_metadata(&p, type, index, &data)` returns a FLAC metadata block's length and its address (zero-copy), or
+  `(size_t)-1`. Types: 0 STREAMINFO, 1 PADDING, 2 APPLICATION, 3 SEEKTABLE, 4 VORBIS_COMMENT, 5 CUESHEET, 6 PICTURE.
+* **`peep_fill` output is always interleaved stereo `int16` at `p.rate`**, the file's own sample rate.
   There is no resampling: open your device at `p.rate`, or resample yourself. Mono is
   duplicated to both sides. With 3 or more channels only the first two are used (no downmix).
 * **`peep_fill` may return fewer frames than asked before the end.** Zero means the stream
@@ -108,9 +114,9 @@ shape for a library whose whole point is to be dropped into anything:
   (`work_need`) and never allocates behind your back.
 * **Real-time safety.** With no allocation, no locks and no system calls, `peep_fill` has
   predictable timing, which is what an audio callback needs.
-* **Size.** The native FLAC decoder is 8.6 KB of code on x86-64 (9.0 KB on ARM64), 4 KB of it the CRC-16
-  tables; `dr_flac` is about 90 KB. The whole library, WAV and FLAC together, is 10.0 KB on x86-64 and
-  10.5 KB on ARM64.
+* **Size.** The native FLAC decoder is 9.3 KB of code on x86-64 (9.7 KB on ARM64), 4 KB of it the CRC-16
+  tables; `dr_flac` is about 90 KB. The whole library, WAV and FLAC together, is 11.8 KB on x86-64 and
+  12.1 KB on ARM64.
 * **Speed costs nothing you can hear.** Native FLAC (x86-64, with every frame's CRC-16 checked) decodes between 25% slower and 5% faster than
   `dr_flac` depending on the file, roughly 700 to 2,500 times faster than real time. Choosing the
   small decoder does not slow anything audible.
@@ -124,7 +130,7 @@ What each piece is:
 |---|---|---|
 | WAV, 16-bit PCM | `peep.asm` (built in) | Peep's own decoder, carried over unchanged. The simplest format, so the kernel is useful on its own with no codec at all. It reads straight from your memory and applies volume in the same pass. |
 | FLAC | `flac.asm` (`peep_codec_flac`) | The most widely used lossless format, and the one where a freestanding native decoder pays off most: it is where the dependency, memory and size cost of a C decoder is greatest. |
-| `dr_flac` adapter | `examples/codec_drflac.c` | Not part of the library. It is (1) the model for plugging in any other decoder, (2) the reference the native decoder is compared against in the tests, and (3) the fallback for FLAC above 24 bits per sample, which the native decoder rejects. (It still needs the core, so it is not a way to run on a CPU the core does not support.) |
+| `dr_flac` adapter | `examples/codec_drflac.c` | Not part of the library. It is (1) the model for plugging in any other decoder, (2) the reference the native decoder is compared against in the tests, and (3) the fallback for 32-bit FLAC, which the native decoder rejects. (It still needs the core, so it is not a way to run on a CPU the core does not support.) |
 
 ## Other formats (MP3, Vorbis, ...)
 
@@ -141,15 +147,19 @@ typedef struct peep_codec {
     size_t (*read)(peep *p, int16_t *out, size_t frames);
     void   (*seek)(peep *p, uint64_t frame);                // may be NULL
     void   (*close)(peep *p);                               // may be NULL
+    size_t (*read32)(peep *p, int32_t *out, size_t frames); // may be NULL: int32, left-justified (<< 32 - bits)
 } peep_codec;
 ```
 
 * `open`: return 0 quickly if the data is not yours (look at the magic bytes first). On success
   set `p->rate`, `p->channels` (1 to 8) and `p->total` (frames, 0 if unknown). Rate must be
-  1,000 to 768,000 Hz or `peep_open` rejects it. Use `p->ctx` and `p->state[56]` for your state.
+  1,000 to 1,048,575 Hz or `peep_open` rejects it. Also set `p->bits` (0 means 16). Use `p->ctx` and `p->state[56]` for your state.
   Do not touch `p->pos`, `p->gain` or `p->kind`.
 * `read`: write interleaved `int16` in the file's own channel count, up to `frames` frames, and
   return how many. Return 0 only at the end of the stream. Never write more than asked.
+* Optional `read32`: the same frames as `int32`, left-justified, in the file's channel count. Provide it when `p->bits`
+  is above 16 so `peep_fill32` and the dithered 16-bit output get the full resolution; without it they widen `read`.
+  Note the `peep_codec` struct grew by one pointer: adapters compiled against the old header must be rebuilt.
 * Need memory? Use `p->work` (`p->work_size` bytes). If it is NULL or too small, set
   `p->work_need` and return 0.
 * If your decoder may read before the start of the workspace (the FLAC one does, by up to 16
@@ -160,7 +170,7 @@ typedef struct peep_codec {
 ## If you modify this repository
 
 * The `peep` struct layout is written in **five places that must agree**: `peep.h`, the `P_*`
-  constants at the top of `peep.asm`, the `P_*` / `S_*` constants at the top of `flac.asm`, the
+  constants at the top of `peep.asm`, the `P_*` / `S_*` constants (`P_ERRS` 152, `P_DITH` 156, `P_BITS` 158 are new) at the top of `flac.asm`, the
   `P_*` constants in `arm64/abi_a64.inc`, and the `S_*` constants at the top of `arm64/flac.s`.
   Change one, change all, then run the tests.
 * The two ports are the same design in two instruction sets. A behaviour change belongs in both, and
@@ -187,6 +197,6 @@ typedef struct peep_codec {
 * 32-bit ARM is not supported.
 * The Windows build has been tested under Wine, not on real Windows.
 * A damaged FLAC frame (its CRC-16 fails) is output as silence of the same length and decoding carries on;
-  there is no way yet for the caller to be told that it happened.
-* FLAC above 24 bits, MP3 and Vorbis are not handled natively.
+  `p->errors` counts them, so the caller can be told afterwards.
+* 32-bit FLAC, MP3 and Vorbis are not handled natively.
 * WAV is 16-bit PCM only (8-bit, 24-bit and float WAV need a codec).

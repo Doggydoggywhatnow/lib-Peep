@@ -1,8 +1,9 @@
-// Liberated Peep 0.3.1 (arm64): the core. Same API and behaviour as peep.asm (x86-64).
+// Liberated Peep 0.4.0 (arm64): the core. Same API and behaviour as peep.asm (x86-64).
 // Freestanding: no libc, no malloc, no syscalls, no writable globals. See peep.h.
 
 .include "abi_a64.inc"
 
+.equ HR_CHUNK, 64                     // frames per step on the full-resolution routes
 .equ SCR,      192                    // frames of scratch for >2-channel codecs
 .equ SCRBYTES, 192 * 8 * 2            // 3072
 .equ FRAMESZ,  SCRBYTES + 16
@@ -87,6 +88,91 @@ FUNCL mix_gen
     subs  x11, x11, #1
     b.ne  .Lmg_l
 .Lmg_d:
+    ret
+
+// ---------------------------------------------------------------------------
+// Full-resolution helpers (same arithmetic as the x86-64 versions)
+// ---------------------------------------------------------------------------
+
+// m16_32: int16 source (any channel count) -> stereo int32, left-justified, with gain.
+//   x9 = src, x10 = dst, x11 = frames, w12 = gain (0..256), x13 = source bytes per frame,
+//   x14 = byte offset of the right channel (0 = mono). (x * gain) << 8 is exact. Clobbers x15.
+FUNCL m16_32
+    cbz   x11, .Lm16_d
+.Lm16_l:
+    ldrsh w15, [x9]
+    mul   w15, w15, w12
+    lsl   w15, w15, #8
+    str   w15, [x10]
+    ldrsh w15, [x9, x14]
+    mul   w15, w15, w12
+    lsl   w15, w15, #8
+    str   w15, [x10, #4]
+    add   x9, x9, x13
+    add   x10, x10, #8
+    subs  x11, x11, #1
+    b.ne  .Lm16_l
+.Lm16_d:
+    ret
+
+// m32_32: int32 source -> stereo int32 with gain at 64-bit precision: (x * gain) >> 8.
+//   x9 = src, x10 = dst (may equal src when src is stereo), x11 = frames, w12 = gain,
+//   x13 = source bytes per frame, x14 = byte offset of the right channel. Clobbers x15.
+FUNCL m32_32
+    cbz   x11, .Lm32_d
+.Lm32_l:
+    ldrsw x15, [x9]
+    mul   x15, x15, x12
+    asr   x15, x15, #8
+    str   w15, [x10]
+    ldrsw x15, [x9, x14]
+    mul   x15, x15, x12
+    asr   x15, x15, #8
+    str   w15, [x10, #4]
+    add   x9, x9, x13
+    add   x10, x10, #8
+    subs  x11, x11, #1
+    b.ne  .Lm32_l
+.Lm32_d:
+    ret
+
+// conv16: int32 samples -> int16, saturating.   x9 = src, x10 = dst, x11 = sample count,
+//   w12 = mode: 0 truncate, 1 round to nearest, 2 TPDF dither (triangular, +-1 LSB, then round)
+//   w13 = xorshift32 state for mode 2 (the caller keeps it between calls). Clobbers x14-x16.
+FUNCL conv16
+    cbz   x11, .Lc16_d
+.Lc16_l:
+    ldrsw x14, [x9], #4
+    cmp   w12, #2
+    b.ne  .Lc16_nd
+    eor   w13, w13, w13, lsl #13      // xorshift32
+    eor   w13, w13, w13, lsr #17
+    eor   w13, w13, w13, lsl #5
+    and   w15, w13, #0xFFFF           // two uniform 16-bit numbers
+    lsr   w16, w13, #16
+    add   w15, w15, w16
+    mov   w16, #0xFFFF
+    sub   w15, w15, w16               // their sum minus the mean: triangular, -65535 .. 65535
+    sxtw  x15, w15
+    add   x14, x14, x15
+    add   x14, x14, #8, lsl #12       // + 32768 (rounding)
+    b     .Lc16_s
+.Lc16_nd:
+    cmp   w12, #1
+    b.ne  .Lc16_s
+    add   x14, x14, #8, lsl #12
+.Lc16_s:
+    asr   x14, x14, #16
+    mov   x15, #32767
+    cmp   x14, x15
+    csel  x14, x14, x15, lt
+    mov   x15, #-32768
+    cmp   x14, x15
+    csel  x14, x14, x15, gt
+    strh  w14, [x10], #2
+    subs  x11, x11, #1
+    b.ne  .Lc16_l
+.Lc16_d:
     ret
 
 // ---------------------------------------------------------------------------
@@ -192,6 +278,8 @@ FUNC peep_open
     str   x2, [x19, #P_TOTAL]
     mov   w0, #KIND_WAV
     str   w0, [x19, #P_KIND]
+    mov   w0, #16
+    strh  w0, [x19, #P_BITS]
     b     .Lpo_validate
 .Lpo_next:
     and   x6, x2, #1                  // odd-sized chunks carry a pad byte
@@ -226,11 +314,16 @@ FUNC peep_open
     str   xzr, [x1, #80]
     mov   w1, #256
     str   w1, [x19, #P_GAIN]
+    strh  wzr, [x19, #P_BITS]
     add   x20, x20, #8
     b     .Lpo_cl
 .Lpo_gotc:
     mov   w0, #KIND_COD
     str   w0, [x19, #P_KIND]
+    ldrh  w0, [x19, #P_BITS]          // a codec that does not say is taken to be 16-bit
+    cbnz  w0, .Lpo_validate
+    mov   w0, #16
+    strh  w0, [x19, #P_BITS]
 
     // ---- sanity: 1..8 channels, 1 kHz..768 kHz ------------------------------
 .Lpo_validate:
@@ -240,7 +333,7 @@ FUNC peep_open
     b.hi  .Lpo_bad
     ldr   w0, [x19, #P_RATE]
     sub   w0, w0, #1000
-    MOV32 w1, 767000
+    MOV32 w1, 1047575
     cmp   w0, w1
     b.hi  .Lpo_bad
     mov   w0, #1
@@ -320,6 +413,17 @@ FUNC peep_fill
 
     // ---- codec -------------------------------------------------------------------
 .Lpf_cod:
+    ldr   x0, [x19, #P_CODEC]         // a source wider than 16 bits, when the volume or the output mode
+    ldr   x0, [x0, #C_READ32]         // asks for more than plain truncation, goes through the
+    cbz   x0, .Lpf_cod16              // full-resolution path: gain first, then one rounding step
+    ldrh  w0, [x19, #P_BITS]
+    cmp   w0, #16
+    b.ls  .Lpf_cod16
+    cmp   w22, #256
+    b.ne  .Lpf_hires
+    ldrh  w0, [x19, #P_DITH]
+    cbnz  w0, .Lpf_hires
+.Lpf_cod16:
     ldr   w2, [x19, #P_CH]
     cmp   w2, #2
     b.ne  .Lpf_multi
@@ -378,7 +482,212 @@ FUNC peep_fill
     add   x0, x0, x23
     str   x0, [x19, #P_POS]
     mov   x0, x23
+    b     .Lpf_ret
+.Lpf_hires:
+    ldr   w0, [x19, #P_DATA]          // dither state: seeded on first use
+    cbnz  w0, .Lpf_hs
+    MOV32 w0, 0x9E3779B9
+    str   w0, [x19, #P_DATA]
+.Lpf_hs:
+    mov   x23, #0
+.Lpf_hl:
+    cbz   x21, .Lpf_hdone
+    mov   x0, #HR_CHUNK
+    cmp   x21, x0
+    csel  x24, x21, x0, lo
+    ldr   x3, [x19, #P_CODEC]
+    ldr   x3, [x3, #C_READ32]
+    mov   x0, x19
+    mov   x1, sp
+    mov   x2, x24
+    blr   x3
+    cbz   x0, .Lpf_hdone
+    cmp   x0, x24
+    csel  x24, x0, x24, lo
+    mov   x9, sp
+    add   x10, sp, #2048
+    mov   x11, x24
+    mov   w12, w22
+    ldr   w2, [x19, #P_CH]
+    lsl   x13, x2, #2
+    mov   x14, #4
+    cmp   w2, #1
+    b.ne  .Lpf_h2
+    mov   x14, #0
+.Lpf_h2:
+    bl    m32_32                      // to stereo, gain at full precision
+    add   x9, sp, #2048
+    mov   x10, x20
+    lsl   x11, x24, #1
+    ldrh  w12, [x19, #P_DITH]
+    mov   w0, #2
+    cmp   w12, w0
+    csel  w12, w12, w0, ls
+    ldr   w13, [x19, #P_DATA]
+    bl    conv16                      // the one reduction to 16 bits
+    str   w13, [x19, #P_DATA]
+    add   x20, x20, x24, lsl #2
+    add   x23, x23, x24
+    sub   x21, x21, x24
+    b     .Lpf_hl
+.Lpf_hdone:
+    ldr   x0, [x19, #P_POS]
+    add   x0, x0, x23
+    str   x0, [x19, #P_POS]
+    mov   x0, x23
 .Lpf_ret:
+    add   sp, sp, #FRAMESZ
+    ldp   x19, x20, [sp, #16]
+    ldp   x21, x22, [sp, #32]
+    ldp   x23, x24, [sp, #48]
+    ldp   x29, x30, [sp], #80
+    ret
+
+// ---------------------------------------------------------------------------
+// size_t peep_fill32(peep *p, int32_t *out, size_t frames)
+// Full resolution: interleaved stereo int32, each sample left-justified (value << (32 - bits)).
+// Volume at 64-bit precision; nothing is rounded or dithered. 0 = end of stream.
+// ---------------------------------------------------------------------------
+FUNC peep_fill32
+    stp   x29, x30, [sp, #-80]!
+    mov   x29, sp
+    stp   x19, x20, [sp, #16]
+    stp   x21, x22, [sp, #32]
+    stp   x23, x24, [sp, #48]
+    sub   sp, sp, #FRAMESZ
+    mov   x19, x0
+    mov   x20, x1
+    mov   x21, x2
+    ldr   w0, [x19, #P_GAIN]
+    mov   w1, #256
+    cmp   w0, w1
+    csel  w22, w0, w1, lo
+    ldr   w0, [x19, #P_KIND]
+    cmp   w0, #KIND_WAV
+    b.eq  .Lf32_wav
+    cmp   w0, #KIND_COD
+    b.eq  .Lf32_cod
+.Lf32_zero:
+    mov   x0, #0
+    b     .Lf32_ret
+.Lf32_wav:
+    ldr   x0, [x19, #P_TOTAL]
+    ldr   x1, [x19, #P_POS]
+    subs  x0, x0, x1
+    b.lo  .Lf32_zero
+    cmp   x21, x0
+    csel  x21, x21, x0, lo
+    cbz   x21, .Lf32_zero
+    ldr   w2, [x19, #P_CH]
+    lsl   x13, x2, #1
+    mul   x9, x1, x13
+    ldr   x3, [x19, #P_DATA]
+    add   x9, x9, x3
+    mov   x10, x20
+    mov   x11, x21
+    mov   w12, w22
+    mov   x14, #0
+    cmp   w2, #1
+    b.eq  .Lf32_w1
+    mov   x14, #2
+.Lf32_w1:
+    bl    m16_32
+    ldr   x0, [x19, #P_POS]
+    add   x0, x0, x21
+    str   x0, [x19, #P_POS]
+    mov   x0, x21
+    b     .Lf32_ret
+.Lf32_cod:
+    ldr   x3, [x19, #P_CODEC]
+    ldr   x3, [x3, #C_READ32]
+    cbz   x3, .Lf32_c16
+    ldr   w2, [x19, #P_CH]
+    cmp   w2, #2
+    b.ne  .Lf32_c32
+    mov   x0, x19                     // stereo: the codec writes straight into out
+    mov   x1, x20
+    mov   x2, x21
+    blr   x3
+    cmp   x0, x21
+    csel  x23, x0, x21, lo
+    mov   x9, x20
+    mov   x10, x20
+    mov   x11, x23
+    mov   w12, w22
+    mov   x13, #8
+    mov   x14, #4
+    bl    m32_32
+    b     .Lf32_cdone
+.Lf32_c32:                            // mono / 3+ channels through the scratch area
+    mov   x23, #0
+.Lf32_c3l:
+    cbz   x21, .Lf32_cdone
+    mov   x0, #HR_CHUNK
+    cmp   x21, x0
+    csel  x24, x21, x0, lo
+    ldr   x3, [x19, #P_CODEC]
+    ldr   x3, [x3, #C_READ32]
+    mov   x0, x19
+    mov   x1, sp
+    mov   x2, x24
+    blr   x3
+    cbz   x0, .Lf32_cdone
+    cmp   x0, x24
+    csel  x24, x0, x24, lo
+    mov   x9, sp
+    mov   x10, x20
+    mov   x11, x24
+    mov   w12, w22
+    ldr   w2, [x19, #P_CH]
+    lsl   x13, x2, #2
+    mov   x14, #4
+    cmp   w2, #1
+    b.ne  .Lf32_c3m
+    mov   x14, #0
+.Lf32_c3m:
+    bl    m32_32
+    add   x20, x20, x24, lsl #3
+    add   x23, x23, x24
+    sub   x21, x21, x24
+    b     .Lf32_c3l
+.Lf32_c16:                            // a codec without read32: widen its 16-bit output
+    mov   x23, #0
+.Lf32_c1l:
+    cbz   x21, .Lf32_cdone
+    mov   x0, #SCR
+    cmp   x21, x0
+    csel  x24, x21, x0, lo
+    ldr   x3, [x19, #P_CODEC]
+    ldr   x3, [x3, #C_READ]
+    mov   x0, x19
+    mov   x1, sp
+    mov   x2, x24
+    blr   x3
+    cbz   x0, .Lf32_cdone
+    cmp   x0, x24
+    csel  x24, x0, x24, lo
+    mov   x9, sp
+    mov   x10, x20
+    mov   x11, x24
+    mov   w12, w22
+    ldr   w2, [x19, #P_CH]
+    lsl   x13, x2, #1
+    mov   x14, #0
+    cmp   w2, #1
+    b.eq  .Lf32_c1m
+    mov   x14, #2
+.Lf32_c1m:
+    bl    m16_32
+    add   x20, x20, x24, lsl #3
+    add   x23, x23, x24
+    sub   x21, x21, x24
+    b     .Lf32_c1l
+.Lf32_cdone:
+    ldr   x0, [x19, #P_POS]
+    add   x0, x0, x23
+    str   x0, [x19, #P_POS]
+    mov   x0, x23
+.Lf32_ret:
     add   sp, sp, #FRAMESZ
     ldp   x19, x20, [sp, #16]
     ldp   x21, x22, [sp, #32]

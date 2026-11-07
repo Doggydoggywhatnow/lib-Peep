@@ -7,9 +7,9 @@ kernel, set free from the player. Peep is a music player that is just a screen;
 Liberated Peep is what is left when you take the screen away: the part that turns
 an audio file into samples, small enough to drop into any program that can call C.
 
-Version **0.3.1**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
+Version **0.4.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
 
-* **About 10 KB of pure assembly** for WAV and FLAC together (4 KB of that is CRC tables), hand-written for both x86-64 and ARM64
+* **About 12 KB of pure assembly** for WAV and FLAC together (4 KB of that is CRC tables), hand-written for both x86-64 and ARM64
 * **No libc, no `malloc`, no threads, no system calls, no global state**
 * **You pull the audio**: call `peep_fill` from your audio callback and get stereo samples
 * **You own the memory**: nothing is allocated behind your back
@@ -30,6 +30,10 @@ peep_set_gain(&p, 256);                  // 0..256, 256 = full volume
 // in your audio callback (stereo int16 out):
 size_t n = peep_fill(&p, out, frames);   // 0 = end of track
 memset(out + n * 2, 0, (frames - n) * 4);
+
+// or, for a 24-bit device, the file's own resolution (stereo int32, left-justified):
+size_t m = peep_fill32(&p, out32, frames);
+// a 16-bit device fed from a 24-bit file sounds cleaner with dither: peep_set_dither(&p, 2);
 
 peep_seek(&p, frame);  peep_close(&p);
 ```
@@ -54,18 +58,32 @@ the build system: assemble `peep.asm` and `flac.asm` yourself
 
 | File | Code size | What |
 |---|---|---|
-| `peep.asm` | 1.3 KB | `peep_open / fill / seek / close`, built-in 16-bit PCM WAV (plain, extensible, odd chunks, unknown length, truncated), volume, channel mapping to stereo |
-| `flac.asm` | 8.6 KB | native FLAC decoder: 4 to 24 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table, CRC-16 checked frames (4 KB of the size is the CRC tables) |
+| `peep.asm` | 2.5 KB | `peep_open / fill / fill32 / seek / close`, full-resolution output, 16-bit reduction with rounding or dither, built-in 16-bit PCM WAV (plain, extensible, odd chunks, unknown length, truncated), volume, channel mapping to stereo |
+| `flac.asm` | 9.3 KB | native FLAC decoder: 4 to 31 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table, CRC-16 checked frames (4 KB of the size is the CRC tables), full-resolution output, ID3v2 skipping, damage counter, metadata access |
 | `abi.inc` | | System V and Microsoft x64 glue, so one source builds for both |
-| `arm64/peep.s` | 1.4 KB | the same core in AArch64 assembly (NEON for volume) |
-| `arm64/flac.s` | 9.0 KB | the same FLAC decoder in AArch64 assembly (NEON for stereo and output), CRC-16 checked |
+| `arm64/peep.s` | 2.5 KB | the same core in AArch64 assembly |
+| `arm64/flac.s` | 9.7 KB | the same FLAC decoder in AArch64 assembly (NEON for stereo and output), same features |
 | `arm64/abi_a64.inc` | | AArch64 glue: calling convention, symbol naming |
 | `peep.h` | | the whole public API |
 | `examples/codec_drflac.c` | | a 20-line codec adapter (wraps `dr_flac`): the model for adding any other format |
 
+## Sound quality (0.4.0)
+
+* **`peep_fill32`** returns stereo `int32`, each sample left-justified (`value << (32 - bits)`): a 24-bit file arrives
+  with every bit, a 16-bit file as `x << 16`. Volume is applied at 64-bit precision and nothing is rounded.
+* **`peep_fill`** (16-bit output) now applies the volume to the full-resolution sample *before* the one reduction to
+  16 bits. `peep_set_dither(&p, mode)` picks it: 0 truncate (default, and bit-exact as before), 1 round to nearest,
+  2 TPDF dither. 16-bit sources are never touched. The dither is deterministic (xorshift32), so output is repeatable.
+* **FLAC 4 to 31 bits** per sample (25 to 31 were rejected before). 32-bit FLAC is not supported yet.
+* **`p->bits`** is the source bit depth. **`p->errors`** counts damaged frames met so far (CRC failure or an
+  undecodable frame), so a caller can now be told that damage happened.
+* **`peep_flac_metadata(p, type, index, &data)`** gives zero-copy access to STREAMINFO, SEEKTABLE, VORBIS_COMMENT,
+  PICTURE and the other metadata blocks.
+* ID3v2 tags in front of a FLAC stream are skipped. Sample rates up to 1,048,575 Hz are accepted.
+
 ## Adding a codec
 
-A codec is four function pointers: `open`, `read`, `seek`, `close`. Hand `peep_open` a
+A codec is four function pointers: `open`, `read`, `seek`, `close` (plus an optional fifth, `read32`, for full resolution). Hand `peep_open` a
 NULL-terminated list of them. `examples/codec_drflac.c` shows a complete adapter;
 `flac.asm` is the same interface written in assembly. A codec that needs memory reads
 `p->work` and reports what it wants in `p->work_need`. See `AGENTS.md` for the contract.
@@ -100,7 +118,7 @@ Liberated Peep checks every frame's CRC-16; this table includes that cost. Measu
 without the check, it costs 4% to 12% (most on lightly compressed files, least on high compression levels).
 
 WAV decodes at about 140,000x realtime at full volume (it is a copy) and about 80,000x
-with volume applied. Code size: 8.6 KB for FLAC (9.0 KB on ARM64) against about 90 KB of `dr_flac`.
+with volume applied. Code size: 9.3 KB for FLAC (9.7 KB on ARM64) against about 90 KB of `dr_flac`.
 
 ## Limits
 
@@ -112,12 +130,12 @@ with volume applied. Code size: 8.6 KB for FLAC (9.0 KB on ARM64) against about 
   mode (`as --defsym APPLE=1`: underscore-prefixed symbols, Mach-O sections) but it has never been
   assembled or run. Intel Macs are untested too and would need `nasm -f macho64` and
   underscore-prefixed symbol names, which the x86 sources do not have.
-* **FLAC above 24 bits per sample is rejected**, as is a stream whose STREAMINFO block is
+* **FLAC above 31 bits per sample (that is, 32-bit) is rejected**, as is a stream whose STREAMINFO block is
   missing or understates the maximum block size.
 * **A damaged FLAC frame comes out as silence, not as a decoded error.** Every frame's CRC-16 is checked. A
   frame that fails it is replaced by silence of the same length (so timing and seek positions stay
   right) and decoding resumes at the next valid frame. A bit flip is never turned into wrong samples.
-  The decoder cannot tell you that it happened: there is no error report yet.
+  `p->errors` counts how many frames were damaged.
 * Seeking is a binary search over frame headers; a byte pattern that looks like a valid
   header could, very rarely, mislead it.
 * Built-in WAV handles 16-bit PCM only. Other WAV formats need a codec.
@@ -132,11 +150,13 @@ with volume applied. Code size: 8.6 KB for FLAC (9.0 KB on ARM64) against about 
 * `tools/mkflac.py`: a randomised FLAC **encoder** that uses every feature of the format and
   knows the exact PCM it wrote, so the decoder is checked against ground truth (all 11
   channel modes, fixed and variable block size, every block-size and sample-rate code, 4 to
-  24 bit, constant / verbatim / fixed / LPC subframes, wasted bits, both Rice methods,
+  31 bit, constant / verbatim / fixed / LPC subframes, wasted bits, both Rice methods,
   escape partitions, very long unary runs, extra metadata, unknown length, random seeks)
 * `tools/testwav.py`: 2,505 checks of the WAV path
 * `tools/fuzz.c`: a mutation fuzzer that puts the input and the workspace against unmapped
   guard pages and has a hang watchdog (`make fuzz` runs a long one)
+* `tools/testhires.py`: independent model checks of `peep_fill32`, the gain, the 16-bit rounding and dither modes
+  (bit-exact against a Python model), metadata blocks, WAV and legacy-codec widening
 * `make test-arm64` runs the same suites on the ARM64 build (under QEMU on an x86 machine:
   `make test-arm64 CROSS=aarch64-linux-gnu-`; needs `qemu-aarch64`)
 * `make build/peepdump.exe` builds the Windows test tool (needs mingw-w64); run it under `wine`
@@ -147,7 +167,8 @@ inputs (about 32 billion frames decoded) with no crash, hang or out-of-bounds ac
 under valgrind; identical output to `dr_flac` on every real ffmpeg-encoded file tried
 (levels 0 to 12, mono, 5.1, 96 kHz, 24-bit); the Windows build passes the same corpus under
 Wine. The decoder was deliberately broken in 39 ways; 35 were caught and the other 4 turned
-out not to change the output.
+out not to change the output. The 0.4.0 code was broken 16 more ways on each CPU; all 32 were caught (one gap in the
+tests, ID3 sizes above 2 MB, was found this way and closed).
 
 The ARM64 build, run under QEMU: 2,505 WAV checks and 480+ random FLAC streams with 1,100+ seeks
 with zero failures; output identical to the x86-64 decoder and to `dr_flac` on every real file;

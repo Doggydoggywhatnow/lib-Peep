@@ -1,6 +1,6 @@
 # Header Versions
 
-**Liberated Peep, Audio for All** · lib-Peep 0.3.1 · built from Peep 0.2.11
+**Liberated Peep, Audio for All** · lib-Peep 0.4.0 · built from Peep 0.2.11
 
 Liberated Peep is a tiny WAV and FLAC decoder written in assembly. Its native interface is a plain C ABI, so any language
 that can call into a shared library can use it. This folder has **22 ready-made packages, one per language**.

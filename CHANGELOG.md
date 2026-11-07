@@ -2,6 +2,47 @@
 
 All notable changes to Liberated Peep.
 
+## 0.4.0
+
+**Built from Peep 0.2.11.** Full-resolution FLAC output and a sturdier decoder, on x86-64 and ARM64.
+
+### Added
+- **`peep_fill32`**: stereo `int32` output, each sample left-justified (`value << (32 - bits)`), volume at 64-bit
+  precision, nothing rounded. Works for WAV, FLAC (through the new optional `read32` codec pointer) and legacy
+  codecs (their 16-bit output is widened).
+- **Cleaner 16-bit output.** For sources wider than 16 bits `peep_fill` applies the volume at full precision and
+  reduces to 16 bits once. `peep_set_dither(p, mode)`: 0 truncate (default; unchanged behaviour), 1 round, 2 TPDF
+  dither (deterministic xorshift32). 16-bit sources are untouched.
+- **FLAC 25 to 31 bits per sample** (the limit was 24). 32-bit is still rejected.
+- **ID3v2 tags** in front of a FLAC stream are skipped (including footers and stacked tags).
+- **`p->errors`** counts damaged frames (CRC-16 failures and undecodable frames), so callers can be told. **`p->bits`**
+  gives the source bit depth.
+- **`peep_flac_metadata`**: zero-copy access to FLAC metadata blocks (STREAMINFO, SEEKTABLE, VORBIS_COMMENT, PICTURE, ...).
+- Sample-rate cap raised from 768,000 to 1,048,575 Hz (STREAMINFO's own limit).
+- ARM64 has all of the above, with the same arithmetic (the dither stream is bit-identical on both CPUs).
+
+### Changed (API)
+- `peep_codec` has a fifth, optional member `read32`, and `struct peep` uses the previously spare tail
+  (`errors`, `dither`, `bits`; still 160 bytes). **Adapters compiled against the 0.3.x header must be rebuilt.**
+  The language packages need no change.
+
+### Cost
+- Code size: x86-64 core 1.3 -> 2.5 KB, FLAC 8.6 -> 9.3 KB; ARM64 core 1.4 -> 2.5 KB, FLAC 9.0 -> 9.7 KB.
+
+### Tests
+- New `tools/testhires.py`: independent model checks of `peep_fill32`, gain, the three 16-bit modes (bit-exact against a
+  Python model of the dither), metadata blocks, WAV at every channel count, and the legacy-codec path.
+  `mkflac.py` now covers 25/27/31-bit, 1 MHz, ID3v2 prefixes (up to 2 MB) and trailers; `testcrc.py` also requires
+  `p->errors` to be counted; `fuzz.c` exercises the new calls.
+- x86-64: WAV 2,505, FLAC 120 streams, CRC 300, hires 1,167 checks, 200,000 fuzz inputs, all clean. ARM64 (QEMU): WAV 2,505,
+  FLAC 120, CRC 150, hires 614, 100,000 fuzz inputs, all clean.
+- 16 deliberate breakages of the new code on each CPU, all caught. One was first missed on both CPUs (an ID3 size
+  shift that only matters above 2 MB); the generator now makes such tags and it is caught.
+
+### Not verified / not done
+- ARM64 still only under QEMU. The 22 language packages were regenerated but only the library inside them changed.
+- 32-bit FLAC, MD5 verification, Ogg FLAC and seek-table seeking are not done.
+
 ## 0.3.1
 
 **Built from Peep 0.2.11.** FLAC frames are now integrity-checked, on x86-64 and ARM64.

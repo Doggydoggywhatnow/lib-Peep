@@ -86,11 +86,15 @@ _\name:
 .equ P_WORK,  128
 .equ P_WSIZE, 136
 .equ P_WNEED, 144
+.equ P_ERRS,  152                      // u32 damaged frames met so far (a codec increments it)
+.equ P_DITH,  156                      // u16 16-bit output mode for >16-bit sources: 0 truncate, 1 round, 2 TPDF dither
+.equ P_BITS,  158                      // u16 bits per sample of the source (WAV: 16)
 .equ P_SIZE,  160
 // struct peep_codec
 .equ C_OPEN,  0
 .equ C_READ,  8
 .equ C_SEEK,  16
 .equ C_CLOSE, 24
+.equ C_READ32, 32                     // optional: full-resolution read (int32, left-justified)
 .equ KIND_WAV, 1
 .equ KIND_COD, 2
