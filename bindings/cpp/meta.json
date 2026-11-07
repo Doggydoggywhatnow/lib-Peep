@@ -1,0 +1,25 @@
+{
+ "name": "C++",
+ "folder": "CPlusPlus",
+ "fence": "cpp",
+ "ffi": "`extern \"C\"` declarations inside the C++ header `peep.hpp`",
+ "run": "g++ -std=c++17 -O2 -o demo demo.cpp -L. -lpeep -Wl,-rpath,\"$PWD\" && ./demo",
+ "needs": "a C++17 compiler (g++ or clang++) and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "g++ 13, Linux x86-64.",
+ "notes": [
+  "`peep.hpp` is a C++ header. It declares the C ABI itself and does not include the C header `peep.h`, which is not part of this download.",
+  "Link with `-lpeep` (and `-L.`); at run time the loader must find `libpeep.so` (here via `-Wl,-rpath`).",
+  "`read` returns at most 4096 frames per call."
+ ],
+ "files": [
+  [
+   "peep.hpp",
+   "the binding: header-only C++17 class `peep::Peep`"
+  ],
+  [
+   "demo.cpp",
+   "demo: decodes the test files and prints checksums"
+  ]
+ ]
+}

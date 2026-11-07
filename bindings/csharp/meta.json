@@ -1,0 +1,28 @@
+{
+ "name": "C#",
+ "folder": "CSharp",
+ "fence": "csharp",
+ "ffi": "P/Invoke (`DllImport`)",
+ "run": "DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 dotnet run -c Release --nologo -v q",
+ "needs": ".NET 6 SDK or newer (built with .NET 8) and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": ".NET SDK 8.0, Linux x86-64.",
+ "notes": [
+  "The library is looked for in `$PEEP_LIB`, then the current directory, then the program directory.",
+  "`Read` returns at most 4096 frames per call."
+ ],
+ "files": [
+  [
+   "Peep.csproj",
+   "project file"
+  ],
+  [
+   "Peep.cs",
+   "the binding: class `LiberatedPeep.Peep`"
+  ],
+  [
+   "Program.cs",
+   "demo: decodes the test files and prints checksums"
+  ]
+ ]
+}

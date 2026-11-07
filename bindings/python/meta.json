@@ -1,0 +1,8 @@
+{
+  "name": "Python", "folder": "Python", "fence": "python",
+  "ffi": "ctypes (Python standard library)",
+  "files": [["peep.py", "the binding: `Peep` class"], ["demo.py", "decodes the test files and prints checksums"]],
+  "run": "python3 demo.py", "needs": "Python 3.6 or newer, nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+  "status": "verified", "verified_with": "Python 3.12, Linux x86-64.",
+  "notes": ["`read()` returns at most 4096 frames per call.", "Keep the `Peep` object alive while playing: it owns the memory the library reads from."]
+}

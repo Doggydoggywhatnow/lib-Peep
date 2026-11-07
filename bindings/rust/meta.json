@@ -1,0 +1,33 @@
+{
+ "name": "Rust",
+ "fence": "rust",
+ "ffi": "plain `extern \"C\"` blocks (standard library only, no crates)",
+ "run": "cargo run --release -q",
+ "needs": "Rust 1.60 or newer with cargo and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Rust 1.97, Linux x86-64.",
+ "notes": [
+  "No crates are needed. `build.rs` links against `libpeep.so` in this folder and sets an rpath to it.",
+  "On Windows you also need an import library (`peep.lib`) for `peep.dll`; this binding was only run on Linux.",
+  "`read` returns a slice of at most 4096 frames and is valid until the next call."
+ ],
+ "folder": "Rust",
+ "files": [
+  [
+   "Cargo.toml",
+   "Cargo manifest (no dependencies)"
+  ],
+  [
+   "build.rs",
+   "links against the shared library in this folder"
+  ],
+  [
+   "src/peep.rs",
+   "the binding: module `peep`"
+  ],
+  [
+   "src/main.rs",
+   "demo: decodes the test files and prints checksums"
+  ]
+ ]
+}

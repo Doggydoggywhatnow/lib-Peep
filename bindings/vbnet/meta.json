@@ -1,0 +1,29 @@
+{
+ "name": "Visual Basic .NET",
+ "folder": "VisualBasicNET",
+ "fence": "vbnet",
+ "ffi": "P/Invoke (`DllImport`)",
+ "run": "DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 dotnet run -c Release --nologo -v q",
+ "needs": ".NET 6 SDK or newer (built with .NET 8) and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": ".NET SDK 8.0, Linux x86-64.",
+ "notes": [
+  "This is Visual Basic .NET, not classic VB6 or VBA.",
+  "The library is looked for in `$PEEP_LIB`, then the current directory, then the program directory.",
+  "`Read` returns at most 4096 frames per call."
+ ],
+ "files": [
+  [
+   "Peep.vbproj",
+   "project file"
+  ],
+  [
+   "Peep.vb",
+   "the binding: class `LiberatedPeep.Peep`"
+  ],
+  [
+   "Program.vb",
+   "demo: decodes the test files and prints checksums"
+  ]
+ ]
+}

@@ -1,0 +1,15 @@
+uses Peep;
+
+var P: TPeep; S: TSamples;
+begin
+  P := TPeep.Create(SongBytes);                  { WAV or FLAC, from memory }
+  WriteLn(P.Rate, ' ', P.Channels, ' ', P.Total);
+  repeat
+    S := P.Read(1024);                           { interleaved stereo SmallInt }
+    if Length(S) > 0 then Play(S);               { your audio output }
+  until Length(S) = 0;
+  P.Seek(44100);                                 { jump to frame 44100 }
+  P.SetGain(128);                                { half volume }
+  P.Close;
+  P.Free;
+end.

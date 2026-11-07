@@ -1,0 +1,23 @@
+{
+ "name": "Raku",
+ "fence": "raku",
+ "ffi": "NativeCall (built into Raku)",
+ "run": "raku -I. demo.raku",
+ "needs": "Rakudo 2020.01 or newer and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Rakudo 2022.12, Linux x86-64.",
+ "notes": [
+  "`read` returns at most 4096 frames per call."
+ ],
+ "folder": "Raku",
+ "files": [
+  [
+   "Peep.rakumod",
+   "the binding: `Peep` class"
+  ],
+  [
+   "demo.raku",
+   "decodes the test files and prints checksums"
+  ]
+ ]
+}

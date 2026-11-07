@@ -1,5 +1,5 @@
 /* Liberated Peep (lib-Peep): Peep's playback kernel as a library.  "Audio for All"
- * Version 0.2.0, built from Peep 0.2.11. x86-64 and ARM64. Public domain (Unlicense), see LICENSE.
+ * Version 0.3.0, built from Peep 0.2.11. x86-64 and ARM64. Public domain (Unlicense), see LICENSE.
  *
  * Freestanding x86-64 assembly: no libc, no malloc, no threads, no OS calls.
  * You own all memory. Pull-based: your audio callback calls peep_fill().
@@ -13,7 +13,7 @@
 #define PEEP_H
 #include <stddef.h>
 #include <stdint.h>
-#define LIBPEEP_VERSION "0.2.0"
+#define LIBPEEP_VERSION "0.3.0"
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,6 +77,8 @@ void   peep_close(peep *p);
 
 /* Native assembly FLAC (flac.asm), up to 24 bits per sample, 1 to 8 channels. */
 extern const peep_codec peep_codec_flac;
+/* The same table's address, as a function: for languages whose FFI can call functions but not read data symbols. */
+const peep_codec *peep_flac(void);
 
 static inline void peep_set_gain(peep *p, unsigned q8) { p->gain = q8 > 256 ? 256 : q8; }
 

@@ -1,0 +1,10 @@
+open LiberatedPeep
+
+use peep = new Peep(File.ReadAllBytes "song.flac")        // WAV or FLAC, from memory
+printfn "%d %d %d" peep.Rate peep.Channels peep.Total
+let mutable go = true
+while go do
+    let samples = peep.Read 1024                          // int16[], interleaved stereo
+    if samples.Length = 0 then go <- false else play samples   // your audio output
+peep.Seek 44100UL                                         // jump to frame 44100
+peep.SetGain 128                                          // half volume

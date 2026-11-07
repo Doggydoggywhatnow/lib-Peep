@@ -1,0 +1,26 @@
+{
+ "name": "Perl",
+ "fence": "perl",
+ "ffi": "FFI::Platypus (CPAN; `apt install libffi-platypus-perl`)",
+ "run": "perl demo.pl",
+ "needs": "Perl 5.10 or newer with FFI::Platypus 2.00+ and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Perl 5.38 with FFI::Platypus 2.08, Linux x86-64.",
+ "setup": [
+  "perl -MFFI::Platypus -e1 || cpanm FFI::Platypus   # skip if already installed"
+ ],
+ "notes": [
+  "`read` returns at most 4096 frames per call."
+ ],
+ "folder": "Perl",
+ "files": [
+  [
+   "Peep.pm",
+   "the binding: `Peep` package"
+  ],
+  [
+   "demo.pl",
+   "decodes the test files and prints checksums"
+  ]
+ ]
+}

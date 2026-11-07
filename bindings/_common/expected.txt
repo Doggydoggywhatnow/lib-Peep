@@ -1,0 +1,2 @@
+test.wav rate=44100 channels=2 frames=4410 sum=263816 seek_sum=-69992
+test.flac rate=44100 channels=2 frames=4410 sum=263816 seek_sum=-69992

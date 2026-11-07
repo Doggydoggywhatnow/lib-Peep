@@ -1,0 +1,14 @@
+mod peep;
+use peep::Peep;
+
+let data = std::fs::read("song.flac")?;       // WAV or FLAC, from memory
+let mut p = Peep::new(&data)?;
+println!("{} {} {}", p.rate(), p.channels(), p.total());
+loop {
+    let samples = p.read(1024);               // &[i16], interleaved stereo
+    if samples.is_empty() { break; }
+    play(samples);                            // your audio output
+}
+p.seek(44_100);                               // jump to frame 44100
+p.set_gain(128);                              // half volume
+p.close();

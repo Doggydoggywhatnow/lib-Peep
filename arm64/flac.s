@@ -1269,6 +1269,18 @@ FUNCL flac_seek
 .Lsk_r:
     LEAVE
 
+// const peep_codec *peep_flac(void): the codec table's address, for languages whose FFI can
+// import functions but not data symbols. Position independent (works in a shared library).
+FUNC peep_flac
+.ifdef APPLE
+    adrp  x0, _peep_codec_flac@PAGE
+    add   x0, x0, _peep_codec_flac@PAGEOFF
+.else
+    adrp  x0, :got:peep_codec_flac
+    ldr   x0, [x0, :got_lo12:peep_codec_flac]
+.endif
+    ret
+
 // ============================================================================
     DATA_RO
 .ifdef APPLE

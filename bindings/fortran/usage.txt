@@ -1,0 +1,15 @@
+use peep
+type(peep_t), target :: pe
+logical :: ok
+integer :: n
+
+call peep_open_bytes(pe, song_bytes, ok)       ! WAV or FLAC, from memory
+print *, peep_rate(pe), peep_channels(pe), peep_total(pe)
+do
+  call peep_read(pe, 1024, n)                  ! samples are pe%out(1:2*n), interleaved stereo
+  if (n == 0) exit
+  call play(pe%out(1:2*n))                     ! your audio output
+end do
+call peep_seek_to(pe, 44100_8)                 ! jump to frame 44100
+call peep_set_gain(pe, 128)                    ! half volume
+call peep_close_all(pe)

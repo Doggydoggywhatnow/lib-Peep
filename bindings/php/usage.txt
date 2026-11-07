@@ -1,0 +1,11 @@
+<?php
+require 'peep.php';
+
+$peep = new Peep(file_get_contents('song.flac'));   // WAV or FLAC, from memory
+echo $peep->rate(), ' ', $peep->channels(), ' ', $peep->total(), "\n";
+while ($samples = $peep->read(1024)) {              // array of interleaved stereo int16
+    play($samples);                                 // your audio output
+}
+$peep->seek(44100);                                 // jump to frame 44100
+$peep->setGain(128);                                // half volume
+$peep->close();

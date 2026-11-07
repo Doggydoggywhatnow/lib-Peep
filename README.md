@@ -7,7 +7,7 @@ kernel, set free from the player. Peep is a music player that is just a screen;
 Liberated Peep is what is left when you take the screen away: the part that turns
 an audio file into samples, small enough to drop into any program that can call C.
 
-Version **0.2.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
+Version **0.3.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
 
 * **About 6 KB of pure assembly** for WAV and FLAC together, hand-written for both x86-64 and ARM64
 * **No libc, no `malloc`, no threads, no system calls, no global state**
@@ -69,6 +69,15 @@ A codec is four function pointers: `open`, `read`, `seek`, `close`. Hand `peep_o
 NULL-terminated list of them. `examples/codec_drflac.c` shows a complete adapter;
 `flac.asm` is the same interface written in assembly. A codec that needs memory reads
 `p->work` and reports what it wants in `p->work_need`. See `AGENTS.md` for the contract.
+
+## Other languages
+
+`Downloads/Header Versions/` has **22 ready-made packages, one per language**: Bun, C#, C++, Common Lisp,
+D, F#, Fortran, Free Pascal, Go, Guile, Java, LuaJIT, Nim, Node.js, Perl, PHP, Python, Racket, Raku, Ruby,
+Rust and Visual Basic .NET. Each is a folder (and a zip) with the library, a `build.sh`, one binding, a demo
+and test audio, and **no C header and no other language's binding**. All 22 demos were run on Linux x86-64
+and matched the reference output; none has been run on ARM64, Windows or macOS. Start with
+[`Downloads/Header Versions/README.md`](<Downloads/Header Versions/README.md>).
 
 ## Speed
 

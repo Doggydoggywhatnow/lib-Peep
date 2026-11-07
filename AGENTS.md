@@ -1,6 +1,6 @@
 # AGENTS.md: using Liberated Peep (lib-Peep) in a project
 
-For AI coding agents. Liberated Peep ("Audio for All", version 0.2.0, built from Peep
+For AI coding agents. Liberated Peep ("Audio for All", version 0.3.0, built from Peep
 0.2.11) is a tiny audio-decoding library: you give it the bytes of a WAV or FLAC file and it
 hands back stereo 16-bit samples, on demand. It plays nothing by itself; your program sends
 the samples to a sound device.
@@ -40,6 +40,16 @@ cc app.c peep.o flac.o -o app
 `make` in this repo does the same and builds `build/libpeep.a` (or `build/libpeep_a64.a` on an ARM64 machine). It is a C ABI, so any
 language that can call C can use it. The library has no dependencies; `third_party/dr_flac.h`
 is only for the example adapter and the tests.
+
+## Using it from another language
+
+`Downloads/Header Versions/<Language>/` is a ready-made package for each of 22 languages (Bun, C#, C++, Common
+Lisp, D, F#, Fortran, Free Pascal, Go, Guile, Java, LuaJIT, Nim, Node.js, Perl, PHP, Python, Racket, Raku, Ruby, Rust,
+Visual Basic .NET). If your language is listed, use that package: run its `./build.sh`, then follow its README.
+Do not mix packages: each has one binding and no C header on purpose. For a language that is not listed, call the
+C ABI below through its FFI. Every FFI can use these five functions: `peep_open`, `peep_fill`, `peep_seek`,
+`peep_close` and `peep_flac()` (returns the FLAC codec table's address, so you never need to read a data
+symbol). Build a shared library first (`build.sh` shows how). Only Linux x86-64 was tested for the bindings.
 
 ## The whole API (`peep.h`)
 

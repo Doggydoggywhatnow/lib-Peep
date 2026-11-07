@@ -1,0 +1,11 @@
+#include "peep.hpp"
+
+peep::Peep p(read_file("song.flac"));        // WAV or FLAC, from memory
+std::printf("%u %u %llu\n", p.rate(), p.channels(), (unsigned long long)p.total());
+for (;;) {
+    auto samples = p.read(1024);             // std::vector<int16_t>, interleaved stereo
+    if (samples.empty()) break;
+    play(samples);                           // your audio output
+}
+p.seek(44100);                               // jump to frame 44100
+p.set_gain(128);                             // half volume

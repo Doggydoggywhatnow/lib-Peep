@@ -1,0 +1,31 @@
+{
+ "name": "Node.js",
+ "folder": "NodeJS",
+ "fence": "js",
+ "ffi": "koffi (npm package)",
+ "run": "node demo.js",
+ "needs": "Node.js 16 or newer, npm and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Node.js 22 with koffi 2.x, Linux x86-64.",
+ "setup": [
+  "npm install koffi"
+ ],
+ "notes": [
+  "Needs the `koffi` npm package (`npm install koffi`). It downloads a prebuilt native module.",
+  "`read` returns at most 4096 frames per call."
+ ],
+ "files": [
+  [
+   "peep.js",
+   "the binding: `Peep` class (CommonJS module)"
+  ],
+  [
+   "demo.js",
+   "decodes the test files and prints checksums"
+  ],
+  [
+   "package.json",
+   "npm manifest (depends on `koffi`)"
+  ]
+ ]
+}

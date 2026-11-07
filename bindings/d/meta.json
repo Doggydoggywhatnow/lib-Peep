@@ -1,0 +1,24 @@
+{
+ "name": "D",
+ "fence": "d",
+ "ffi": "`extern(C)` declarations (the D language links to C directly)",
+ "run": "ldc2 -O -of=demo demo.d peep.d -L-L. -L-lpeep -L-rpath=$PWD && ./demo",
+ "needs": "an LDC, DMD or GDC compiler and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "LDC 1.36 (D 2.106), Linux x86-64.",
+ "notes": [
+  "For DMD use `dmd -of=demo demo.d peep.d -L-L. -L-lpeep -L-rpath=$PWD`.",
+  "`read` returns at most 4096 frames per call."
+ ],
+ "folder": "D",
+ "files": [
+  [
+   "peep.d",
+   "the binding: module `peep`"
+  ],
+  [
+   "demo.d",
+   "demo: decodes the test files and prints checksums"
+  ]
+ ]
+}

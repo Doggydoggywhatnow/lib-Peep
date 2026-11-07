@@ -2,6 +2,42 @@
 
 All notable changes to Liberated Peep.
 
+## 0.3.0
+
+**Built from Peep 0.2.11.** Liberated Peep now comes ready-made for 22 programming languages.
+
+### Added
+- **`Downloads/Header Versions/`: 22 self-contained packages, one per language**: Bun, C#, C++, Common
+  Lisp (SBCL), D, F#, Fortran, Free Pascal, Go, GNU Guile, Java, LuaJIT, Nim, Node.js, Perl, PHP, Python,
+  Racket, Raku, Ruby, Rust and Visual Basic .NET. Each package (a folder and a zip) holds the assembly
+  library, a `build.sh`, **one** language binding, a demo, two tiny test files and a README. It never holds
+  a C header or another language's binding, so each download has one sort of header.
+- `build.sh` in every package builds a shared library: `libpeep.so` on Linux x86-64 and Linux ARM64,
+  `peep.dll` on Windows (MSYS2/MinGW).
+- `peep_flac()`, a new exported function that returns the FLAC codec table's address. Languages whose FFI
+  can call functions but cannot read a data symbol (Bun, COBOL and others) need it; every binding uses it.
+  It is position independent, so it works in a shared library, on x86-64 and ARM64. `peep_codec_flac` still
+  works as before.
+- `tools/make_header_versions.py` (builds the packages from `bindings/`) and
+  `tools/test_header_versions.py` (builds each package in a scratch folder and checks its demo's output).
+
+### Verified
+- All 22 demos were built and run on Linux x86-64 and printed exactly the expected output (decode a WAV and
+  a FLAC, then seek and read again), checked against the C reference.
+- The shared library: x86-64 loaded from Python; ARM64 built as a shared library and run under QEMU with a
+  dynamically linked test; the Windows DLL built with MinGW, exports all five functions, and decodes a WAV
+  and a FLAC correctly under Wine.
+- The whole test suites were re-run after the assembly change: `make test` (x86-64) and
+  `make test-arm64` (ARM64, under QEMU) both pass.
+
+### Not verified
+- No binding has been run on ARM64, Windows or macOS; only Linux x86-64. macOS has no shared-library
+  build yet.
+- Free Pascal needs libc linked explicitly (`{$linklib c}`, already in its `Peep.pas`), otherwise a program
+  that loads a shared library crashes in the dynamic loader when it exits.
+- Not written: Swift, Kotlin, Scala, Clojure, Zig, Julia, Haskell, Ada, OCaml, COBOL, Dart, Deno, Crystal,
+  Odin, V, PowerShell, AutoHotkey and others. No untested bindings were shipped; every package here ran.
+
 ## 0.2.0
 
 **Built from Peep 0.2.11.** Liberated Peep now runs on 64-bit ARM as well as x86-64.

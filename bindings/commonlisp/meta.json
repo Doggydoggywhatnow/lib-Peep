@@ -1,0 +1,24 @@
+{
+ "name": "Common Lisp",
+ "folder": "CommonLisp",
+ "fence": "lisp",
+ "ffi": "SBCL `sb-alien` (built into SBCL)",
+ "run": "sbcl --script demo.lisp",
+ "needs": "SBCL 2.0 or newer (uses SBCL-specific `sb-alien`) and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "SBCL 2.2.9, Linux x86-64.",
+ "notes": [
+  "Written for SBCL. Other Lisps need their own FFI layer (for example CFFI) and a small change.",
+  "`read-peep` returns at most 4096 frames per call."
+ ],
+ "files": [
+  [
+   "peep.lisp",
+   "the binding: package `peep`"
+  ],
+  [
+   "demo.lisp",
+   "decodes the test files and prints checksums"
+  ]
+ ]
+}

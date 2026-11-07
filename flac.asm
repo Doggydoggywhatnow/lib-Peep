@@ -1295,6 +1295,20 @@ FUNCL flac_seek, FLOC
     mov  [rbx + S_BLKPOS], eax
 .r: RET_
 
+; const peep_codec *peep_flac(void): the codec table's address, for languages whose FFI can import
+; functions but not data symbols. (Position independent, so it also works in a shared library.)
+%ifdef WIN64
+global peep_flac
+peep_flac:
+    lea  rax, [rel peep_codec_flac]
+    ret
+%else
+global peep_flac:function
+peep_flac:
+    mov  rax, [rel peep_codec_flac wrt ..got]
+    ret
+%endif
+
 ; ============================================================================
 %ifdef WIN64
 section .rdata align=8
