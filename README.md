@@ -9,7 +9,7 @@ an audio file into samples, small enough to drop into any program that can call 
 
 Version **0.1.2**, built from **Peep 0.2.11**.
 
-* **9.9 KB of x86-64 assembly** for WAV and FLAC together (4 KB of that is CRC tables)
+* **10 KB of x86-64 assembly** for WAV and FLAC together (4 KB of that is CRC tables)
 * **No libc, no `malloc`, no threads, no system calls, no global state**
 * **You pull the audio**: call `peep_fill` from your audio callback and get stereo samples
 * **You own the memory**: nothing is allocated behind your back
