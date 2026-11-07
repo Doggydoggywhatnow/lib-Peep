@@ -1,6 +1,6 @@
 # Liberated Peep for Python
 
-**Audio for All** · lib-Peep 0.4.0 · built from Peep 0.2.11
+**Audio for All** · lib-Peep 0.5.0 · built from Peep 0.2.11
 
 Liberated Peep is a tiny audio decoder for WAV and FLAC, hand-written in assembly (x86-64 and ARM64), with no
 dependencies. This download is Liberated Peep with a **Python** binding. It contains one language binding only
@@ -78,7 +78,8 @@ duplicated and 3+ channels use the first two.
 
 ## Limits
 
-x86-64 and ARM64 only. FLAC 4 to 31 bits per sample (32-bit is not supported). 16-bit PCM WAV only. No MP3 or Vorbis. A FLAC frame that fails
+x86-64 and ARM64 only. FLAC 4 to 31 bits per sample (32-bit is not supported). WAV: 16-bit PCM built in; the library also contains the
+extension for 8/12/20/24/32-bit and float WAV (`peep_wavx()`), which these bindings do not enable yet. No MP3 or Vorbis. A FLAC frame that fails
 its CRC-16 is output as silence. Full details: https://github.com/Doggydoggywhatnow/lib-Peep
 
 ## License

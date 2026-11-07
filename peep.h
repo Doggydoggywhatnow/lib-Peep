@@ -1,5 +1,5 @@
 /* Liberated Peep (lib-Peep): Peep's playback kernel as a library.  "Audio for All"
- * Version 0.4.0, built from Peep 0.2.11. x86-64 and ARM64. Public domain (Unlicense), see LICENSE.
+ * Version 0.5.0, built from Peep 0.2.11. x86-64 and ARM64. Public domain (Unlicense), see LICENSE.
  *
  * Freestanding x86-64 assembly: no libc, no malloc, no threads, no OS calls.
  * You own all memory. Pull-based: your audio callback calls peep_fill().
@@ -13,7 +13,7 @@
 #define PEEP_H
 #include <stddef.h>
 #include <stdint.h>
-#define LIBPEEP_VERSION "0.4.0"
+#define LIBPEEP_VERSION "0.5.0"
 
 #ifdef __cplusplus
 extern "C" {
@@ -82,8 +82,12 @@ size_t peep_fill (peep *p, int16_t *out, size_t frames);
 void   peep_seek (peep *p, uint64_t frame);   /* clamps to the end */
 void   peep_close(peep *p);
 
-/* Native assembly FLAC (flac.asm), up to 24 bits per sample, 1 to 8 channels. */
+/* Native assembly FLAC (flac.asm), 4 to 31 bits per sample, 1 to 8 channels. */
 extern const peep_codec peep_codec_flac;
+/* WAV extension codec (wav.asm): unsigned 8-bit, 12/16/20/24/32-bit PCM and 32/64-bit float WAV that the built-in
+ * 16-bit decoder does not take. Put it in the codecs list. No workspace needed. */
+extern const peep_codec peep_codec_wavx;
+const peep_codec *peep_wavx(void);
 /* The same table's address, as a function: for languages whose FFI can call functions but not read data symbols. */
 const peep_codec *peep_flac(void);
 

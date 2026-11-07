@@ -13,8 +13,8 @@ import json, os, shutil, sys, zipfile, textwrap
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'bindings')
 OUT = os.path.join(ROOT, 'Downloads', 'Header Versions')
-LIBFILES = ['peep.asm', 'flac.asm', 'abi.inc', 'arm64/peep.s', 'arm64/flac.s', 'arm64/abi_a64.inc']
-VERSION, BUILT_FROM = '0.4.0', 'Peep 0.2.11'
+LIBFILES = ['peep.asm', 'flac.asm', 'wav.asm', 'abi.inc', 'arm64/peep.s', 'arm64/flac.s', 'arm64/wav.s', 'arm64/abi_a64.inc']
+VERSION, BUILT_FROM = '0.5.0', 'Peep 0.2.11'
 
 BUILD_SH = r'''#!/bin/sh
 # Builds the Liberated Peep shared library for this machine from the assembly in lib/:
@@ -28,20 +28,23 @@ case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)
     nasm -f elf64 peep.asm -o peep.o
     nasm -f elf64 flac.asm -o flac.o
-    ld -shared -z noexecstack -o ../libpeep.so peep.o flac.o ;;
+    nasm -f elf64 wav.asm -o wav.o
+    ld -shared -z noexecstack -o ../libpeep.so peep.o flac.o wav.o ;;
   Linux-aarch64|Linux-arm64)
     as -I arm64 arm64/peep.s -o peep.o
     as -I arm64 arm64/flac.s -o flac.o
-    ld -shared -z noexecstack -o ../libpeep.so peep.o flac.o ;;
+    as -I arm64 arm64/wav.s -o wav.o
+    ld -shared -z noexecstack -o ../libpeep.so peep.o flac.o wav.o ;;
   MINGW64*|MSYS*|CYGWIN*|Windows*)
     nasm -f win64 -DWIN64 peep.asm -o peep.obj
     nasm -f win64 -DWIN64 flac.asm -o flac.obj
-    ${CC:-gcc} -shared -nostdlib -Wl,--entry=0 -Wl,--export-all-symbols -o ../peep.dll peep.obj flac.obj ;;
+    nasm -f win64 -DWIN64 wav.asm -o wav.obj
+    ${CC:-gcc} -shared -nostdlib -Wl,--entry=0 -Wl,--export-all-symbols -o ../peep.dll peep.obj flac.obj wav.obj ;;
   *)
     echo "Liberated Peep: unsupported platform $(uname -s)-$(uname -m) (supported: Linux x86-64, Linux ARM64, Windows x64)" >&2
     exit 1 ;;
 esac
-rm -f peep.o flac.o peep.obj flac.obj
+rm -f peep.o flac.o wav.o peep.obj flac.obj wav.obj
 echo "built the Liberated Peep shared library"
 '''
 
@@ -127,7 +130,8 @@ duplicated and 3+ channels use the first two.
 
 ## Limits
 
-x86-64 and ARM64 only. FLAC 4 to 31 bits per sample (32-bit is not supported). 16-bit PCM WAV only. No MP3 or Vorbis. A FLAC frame that fails
+x86-64 and ARM64 only. FLAC 4 to 31 bits per sample (32-bit is not supported). WAV: 16-bit PCM built in; the library also contains the
+extension for 8/12/20/24/32-bit and float WAV (`peep_wavx()`), which these bindings do not enable yet. No MP3 or Vorbis. A FLAC frame that fails
 its CRC-16 is output as silence. Full details: https://github.com/Doggydoggywhatnow/lib-Peep
 
 ## License

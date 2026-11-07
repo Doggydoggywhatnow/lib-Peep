@@ -26,10 +26,10 @@ static unsigned char *guarded(size_t n, int end, void **base, size_t *tot)
 int main(int argc, char **argv)
 {
     long iters = atol(argv[1]); int nseed = argc - 2;
-    static unsigned char seed[8][1 << 17]; size_t sl[8];
-    if (nseed > 8) nseed = 8;
+    static unsigned char seed[16][1 << 17]; size_t sl[16];
+    if (nseed > 16) nseed = 16;
     for (int i = 0; i < nseed; i++) { FILE *f = fopen(argv[2 + i], "rb"); sl[i] = fread(seed[i], 1, sizeof seed[i], f); fclose(f); }
-    static const peep_codec *const codecs[] = { &peep_codec_flac, 0 };
+    static const peep_codec *const codecs[] = { &peep_codec_wavx, &peep_codec_flac, 0 };
     static int16_t out[4096 * 8 * 2];
     long opened = 0, played = 0; unsigned long long frames_out = 0;
     signal(SIGALRM, hang); if (getenv("FUZZSEED")) s ^= strtoull(getenv("FUZZSEED"), 0, 10) * 0x9E3779B97F4A7C15ull;

@@ -47,11 +47,11 @@ int main(int argc, char **argv)
     if (fd < 0 || fstat(fd, &st) || st.st_size == 0) { fprintf(stderr, "cannot read\n"); return 3; }
     void *d = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 #endif
-    static const peep_codec *const native[] = { &peep_codec_flac, 0 };
+    static const peep_codec *const native[] = { &peep_codec_wavx, &peep_codec_flac, 0 };
 #ifndef NO_DR
-    static const peep_codec *const drc[]    = { &peep_codec_drflac, 0 };
+    static const peep_codec *const drc[]    = { &peep_codec_wavx, &peep_codec_drflac, 0 };
 #else
-    static const peep_codec *const drc[]    = { &peep_codec_flac, 0 };
+    static const peep_codec *const drc[]    = { &peep_codec_wavx, &peep_codec_flac, 0 };
 #endif
     peep p; void *work = NULL; size_t wsize = 0;
     if (!peep_open(&p, dr ? drc : native, d, st.st_size, work, wsize)) {

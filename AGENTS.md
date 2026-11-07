@@ -1,6 +1,6 @@
 # AGENTS.md: using Liberated Peep (lib-Peep) in a project
 
-For AI coding agents. Liberated Peep ("Audio for All", version 0.4.0, built from Peep
+For AI coding agents. Liberated Peep ("Audio for All", version 0.5.0, built from Peep
 0.2.11) is a tiny audio-decoding library: you give it the bytes of a WAV or FLAC file and it
 hands back stereo 16-bit samples, on demand. It plays nothing by itself; your program sends
 the samples to a sound device.
@@ -10,7 +10,7 @@ the samples to a sound device.
 | Use it when | Do not use it when |
 |---|---|
 | the target is x86-64 (Linux, BSD, Windows) or ARM64 Linux (Raspberry Pi, ARM servers) | the target is 32-bit ARM, RISC-V or any other CPU: there is no port |
-| you need WAV or FLAC and want no dependencies | you need MP3, Ogg Vorbis, AAC or Opus (not included; see "Other formats") |
+| you need WAV (8 to 32-bit, float) or FLAC and want no dependencies | you need MP3, Ogg Vorbis, AAC or Opus (not included; see "Other formats") |
 | the audio thread must not allocate, lock or call the OS | you need 32-bit FLAC (up to 31 bits works) |
 | you want a very small binary, or are embedding in an unusual runtime | you need resampling, mixing, EQ or effects (this is a decoder only) |
 
@@ -18,8 +18,8 @@ the samples to a sound device.
 
 Pick the files for your CPU and copy them with `peep.h`. FLAC is optional.
 
-* x86-64: `peep.asm`, `abi.inc`, and `flac.asm` for FLAC. Assemble with `nasm`.
-* ARM64: `arm64/peep.s`, `arm64/abi_a64.inc`, and `arm64/flac.s` for FLAC. Assemble with GNU `as`.
+* x86-64: `peep.asm`, `abi.inc`, `flac.asm` for FLAC and `wav.asm` for 8/24/32-bit and float WAV. Assemble with `nasm`.
+* ARM64: `arm64/peep.s`, `arm64/abi_a64.inc`, `arm64/flac.s` for FLAC and `arm64/wav.s` for 8/24/32-bit and float WAV. Assemble with GNU `as`.
 
 ```sh
 # ARM64 (Linux)
@@ -55,7 +55,7 @@ symbol). Build a shared library first (`build.sh` shows how). Only Linux x86-64 
 
 ```c
 peep p;                                         // 160 bytes; the caller owns it
-const peep_codec *codecs[] = { &peep_codec_flac, NULL };    // WAV is always built in
+const peep_codec *codecs[] = { &peep_codec_flac, &peep_codec_wavx, NULL };    // 16-bit WAV is always built in
 
 int ok = peep_open(&p, codecs, bytes, len, NULL, 0);        // 1 = success
 if (!ok && p.work_need) {                                   // a codec wanted scratch memory
@@ -74,6 +74,8 @@ Rules that matter:
 
 * **Keep `bytes` alive until `peep_close`.** The library reads straight from your memory and
   copies nothing. `mmap` of the file is ideal. The same goes for `work`.
+* **WAV beyond 16-bit:** add `&peep_codec_wavx` to the `codecs` list (before or after FLAC; it needs no workspace). Use
+  `peep_fill32` to keep 24/32-bit and float at full resolution.
 * **`peep_fill32(&p, out32, frames)`** is the full-resolution alternative: interleaved stereo `int32`, each sample
   left-justified (`value << (32 - bits)`), volume at 64-bit precision, no rounding. Use it for 24-bit devices or your own
   mixer. For a 16-bit device fed from a >16-bit file, call `peep_set_dither(&p, 2)` (TPDF) or `1` (round); the default `0`
@@ -199,4 +201,5 @@ typedef struct peep_codec {
 * A damaged FLAC frame (its CRC-16 fails) is output as silence of the same length and decoding carries on;
   `p->errors` counts them, so the caller can be told afterwards.
 * 32-bit FLAC, MP3 and Vorbis are not handled natively.
-* WAV is 16-bit PCM only (8-bit, 24-bit and float WAV need a codec).
+* The built-in WAV is 16-bit PCM only. `peep_codec_wavx` (wav.asm / arm64/wav.s) adds unsigned 8-bit, 12/20/24/32-bit PCM and
+  32/64-bit float; A-law, mu-law and ADPCM WAV are not handled.

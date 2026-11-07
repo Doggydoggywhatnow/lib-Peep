@@ -7,9 +7,9 @@ kernel, set free from the player. Peep is a music player that is just a screen;
 Liberated Peep is what is left when you take the screen away: the part that turns
 an audio file into samples, small enough to drop into any program that can call C.
 
-Version **0.4.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
+Version **0.5.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
 
-* **About 12 KB of pure assembly** for WAV and FLAC together (4 KB of that is CRC tables), hand-written for both x86-64 and ARM64
+* **About 13 KB of pure assembly** for WAV, FLAC and every WAV depth together (4 KB of that is CRC tables), hand-written for both x86-64 and ARM64
 * **No libc, no `malloc`, no threads, no system calls, no global state**
 * **You pull the audio**: call `peep_fill` from your audio callback and get stereo samples
 * **You own the memory**: nothing is allocated behind your back
@@ -20,7 +20,7 @@ Version **0.4.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This re
 #include "peep.h"
 
 peep p;
-const peep_codec *codecs[] = { &peep_codec_flac, NULL };      // WAV is built in
+const peep_codec *codecs[] = { &peep_codec_flac, &peep_codec_wavx, NULL };   // 16-bit WAV is built in
 if (!peep_open(&p, codecs, file_bytes, file_len, NULL, 0) && p.work_need) {
     work = malloc(p.work_need);                                // FLAC asked for scratch memory
     peep_open(&p, codecs, file_bytes, file_len, work, p.work_need);
@@ -60,9 +60,11 @@ the build system: assemble `peep.asm` and `flac.asm` yourself
 |---|---|---|
 | `peep.asm` | 2.5 KB | `peep_open / fill / fill32 / seek / close`, full-resolution output, 16-bit reduction with rounding or dither, built-in 16-bit PCM WAV (plain, extensible, odd chunks, unknown length, truncated), volume, channel mapping to stereo |
 | `flac.asm` | 9.3 KB | native FLAC decoder: 4 to 31 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table, CRC-16 checked frames (4 KB of the size is the CRC tables), full-resolution output, ID3v2 skipping, damage counter, metadata access |
+| `wav.asm` | 1.1 KB | WAV extension codec: unsigned 8-bit, 12 / 16 / 20 / 24 / 32-bit PCM, 32 and 64-bit float, plain or extensible, 1 to 8 channels, full-resolution output |
 | `abi.inc` | | System V and Microsoft x64 glue, so one source builds for both |
 | `arm64/peep.s` | 2.5 KB | the same core in AArch64 assembly |
 | `arm64/flac.s` | 9.7 KB | the same FLAC decoder in AArch64 assembly (NEON for stereo and output), same features |
+| `arm64/wav.s` | 1.3 KB | the same WAV extension codec in AArch64 assembly |
 | `arm64/abi_a64.inc` | | AArch64 glue: calling convention, symbol naming |
 | `peep.h` | | the whole public API |
 | `examples/codec_drflac.c` | | a 20-line codec adapter (wraps `dr_flac`): the model for adding any other format |
@@ -80,6 +82,16 @@ the build system: assemble `peep.asm` and `flac.asm` yourself
 * **`peep_flac_metadata(p, type, index, &data)`** gives zero-copy access to STREAMINFO, SEEKTABLE, VORBIS_COMMENT,
   PICTURE and the other metadata blocks.
 * ID3v2 tags in front of a FLAC stream are skipped. Sample rates up to 1,048,575 Hz are accepted.
+
+## WAV at any bit depth (0.5.0)
+
+The built-in WAV decoder still takes 16-bit PCM and nothing else (and stays 1.3 KB). Put `&peep_codec_wavx` in the codecs list
+and these work too: **unsigned 8-bit; signed 12, 16, 20, 24 and 32-bit PCM; 32-bit and 64-bit IEEE float**, in plain and
+`WAVE_FORMAT_EXTENSIBLE` form, 1 to 8 channels, odd chunks, unknown-length and truncated files. `p->bits` reports the
+valid bit depth (float: 32). `peep_fill32` gives every bit left-justified; `peep_fill` gives 16 bits, with the same volume,
+rounding and dither choices as for FLAC. Float is scaled by 2^31, rounded to nearest even and clipped; NaN is silence.
+No workspace is needed. Not handled: 8-bit A-law/mu-law, ADPCM, and 16-bit files that the built-in decoder already takes
+(an extensible 16-bit file with fewer valid bits reports 16).
 
 ## Adding a codec
 
@@ -138,7 +150,7 @@ with volume applied. Code size: 9.3 KB for FLAC (9.7 KB on ARM64) against about 
   `p->errors` counts how many frames were damaged.
 * Seeking is a binary search over frame headers; a byte pattern that looks like a valid
   header could, very rarely, mislead it.
-* Built-in WAV handles 16-bit PCM only. Other WAV formats need a codec.
+* The built-in WAV handles 16-bit PCM only; add `peep_codec_wavx` for 8, 12, 20, 24, 32-bit and float. A-law, mu-law and ADPCM WAV are not supported.
 * MP3 and Ogg Vorbis are not included yet (Peep itself plays them through C decoders).
 * One `peep` belongs to one thread at a time. Separate `peep`s are independent.
 * The Windows build is tested under Wine, not on real Windows.
@@ -152,7 +164,9 @@ with volume applied. Code size: 9.3 KB for FLAC (9.7 KB on ARM64) against about 
   channel modes, fixed and variable block size, every block-size and sample-rate code, 4 to
   31 bit, constant / verbatim / fixed / LPC subframes, wasted bits, both Rice methods,
   escape partitions, very long unary runs, extra metadata, unknown length, random seeks)
-* `tools/testwav.py`: 2,505 checks of the WAV path
+* `tools/testwav.py`: 2,504 checks of the 16-bit WAV path
+* `tools/testwavx.py`: the WAV extension codec against an independent model (every format, extensible headers, volume,
+  the three 16-bit modes, `peep_fill32`, seeking, truncation, rejects)
 * `tools/fuzz.c`: a mutation fuzzer that puts the input and the workspace against unmapped
   guard pages and has a hang watchdog (`make fuzz` runs a long one)
 * `tools/testhires.py`: independent model checks of `peep_fill32`, the gain, the 16-bit rounding and dither modes

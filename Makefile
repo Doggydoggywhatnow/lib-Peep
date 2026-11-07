@@ -4,8 +4,8 @@ CC   ?= gcc
 MINGW ?= x86_64-w64-mingw32-gcc
 B := build
 FLACDIR ?= third_party
-OBJS := $(B)/peep.o $(B)/flac.o
-WOBJS := $(B)/peep.obj $(B)/flac.obj
+OBJS := $(B)/peep.o $(B)/flac.o $(B)/wav.o
+WOBJS := $(B)/peep.obj $(B)/flac.obj $(B)/wav.obj
 
 # On an ARM64 machine a plain `make` builds the ARM64 library (arm64/*.s, GNU as).
 # On x86-64 it builds the x86-64 one (*.asm, nasm). Cross-build ARM64 from x86-64 with
@@ -37,16 +37,17 @@ clean:; rm -rf $(B)
 # `make test`: ground-truth FLAC corpus (random streams from tools/mkflac.py), the WAV
 # suite, and a short fuzz run. Needs python3 + numpy. `make fuzz` runs a longer one.
 SEEDDIR := $(B)/seeds
-$(SEEDDIR): tools/mkflac.py
-	mkdir -p $@ && for s in 1 10 13 15 17 19; do python3 tools/mkflac.py --gen $@/s$$s --seed $$s >/dev/null; done
+$(SEEDDIR): tools/mkflac.py tools/testwavx.py
+	mkdir -p $@ && for s in 1 10 13 15 17 19; do python3 tools/mkflac.py --gen $@/s$$s --seed $$s >/dev/null; done; python3 tools/testwavx.py --gen $@
 test: $(B)/peepdump $(B)/fuzz $(SEEDDIR)
 	python3 tools/testwav.py $(B)/peepdump
 	python3 tools/mkflac.py --run 120 --seed 1 --tool $(B)/peepdump
 	python3 tools/testcrc.py --run 300 --seed 1 --tool $(B)/peepdump
 	python3 tools/testhires.py --run 120 --seed 1 --tool $(B)/peepdump
-	$(B)/fuzz 200000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac
+	python3 tools/testwavx.py --run 240 --seed 1 --tool $(B)/peepdump
+	$(B)/fuzz 200000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac $(SEEDDIR)/w0.wav $(SEEDDIR)/w1.wav $(SEEDDIR)/w2.wav $(SEEDDIR)/w3.wav $(SEEDDIR)/w4.wav
 fuzz: $(B)/fuzz $(SEEDDIR)
-	for k in 1 2 3 4; do FUZZSEED=$$k $(B)/fuzz 2000000 $(SEEDDIR)/s*.flac & done; wait
+	for k in 1 2 3 4; do FUZZSEED=$$k $(B)/fuzz 2000000 $(SEEDDIR)/s*.flac $(SEEDDIR)/w*.wav & done; wait
 .PHONY: test fuzz
 
 # ---- ARM64 (AArch64) ----------------------------------------------------------
@@ -56,7 +57,7 @@ CROSS ?=
 A64AS ?= $(CROSS)as
 A64AR ?= $(CROSS)ar
 A64CC ?= $(CROSS)gcc
-A64OBJS := $(B)/peep_a64.o $(B)/flac_a64.o
+A64OBJS := $(B)/peep_a64.o $(B)/flac_a64.o $(B)/wav_a64.o
 ifneq (,$(filter aarch64 arm64,$(shell uname -m)))
 QEMU ?=
 else
@@ -81,5 +82,6 @@ test-arm64: $(B)/run_a64.sh $(B)/fuzz_a64 $(SEEDDIR)
 	python3 tools/mkflac.py --run 120 --seed 1 --tool $(B)/run_a64.sh
 	python3 tools/testcrc.py --run 150 --seed 1 --tool $(B)/run_a64.sh
 	python3 tools/testhires.py --run 60 --seed 1 --tool $(B)/run_a64.sh
-	$(QEMU) $(B)/fuzz_a64 100000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac
+	python3 tools/testwavx.py --run 120 --seed 1 --tool $(B)/run_a64.sh
+	$(QEMU) $(B)/fuzz_a64 100000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac $(SEEDDIR)/w0.wav $(SEEDDIR)/w1.wav $(SEEDDIR)/w2.wav $(SEEDDIR)/w3.wav $(SEEDDIR)/w4.wav
 .PHONY: arm64 test-arm64

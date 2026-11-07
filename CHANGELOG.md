@@ -2,6 +2,35 @@
 
 All notable changes to Liberated Peep.
 
+## 0.5.0
+
+**Built from Peep 0.2.11.** WAV at every common bit depth, on x86-64 and ARM64.
+
+### Added
+- **`peep_codec_wavx`** (`wav.asm`, `arm64/wav.s`, about 1.1 KB and 1.3 KB), a WAV extension codec in pure assembly:
+  unsigned 8-bit; signed 12, 16, 20, 24 and 32-bit PCM; 32-bit and 64-bit IEEE float; plain and
+  `WAVE_FORMAT_EXTENSIBLE`; 1 to 8 channels; odd chunks, unknown-length data, truncated files. It needs no workspace.
+  It provides `read32` and sets `p->bits` (float: 32), so `peep_fill32`, volume and the rounding/dither modes work as for FLAC.
+  Float is scaled by 2^31, rounded to nearest even and clipped (NaN is 0). `peep_wavx()` returns its table's address.
+- The built-in 16-bit WAV decoder is unchanged: its size, speed and rejections are the same. The extension is a separate
+  codec on purpose, so a program that only needs 16-bit WAV does not carry it.
+
+### Changed
+- `testwav.py` no longer expects 8-bit and float WAV to be rejected (with the extension in the codec list they are accepted;
+  the plain built-in still rejects them). The `peepdump` test tool and the fuzzer now list `peep_codec_wavx`.
+
+### Tests
+- New `tools/testwavx.py` (in `make test` and `make test-arm64`): an independent Python model of every format, extensible
+  headers, odd and junk chunks, unknown length, truncation, seeking, volume, the three 16-bit modes, `peep_fill32` and 12
+  kinds of file that must be rejected. Float cases include NaN, infinities, denormals, 1.0, out-of-range values and exact
+  rounding ties.
+- The fuzzer now mutates five WAV seeds as well.
+
+### Not done
+- The 22 language packages build the new codec into their library but their bindings do not yet pass it in the codec list.
+- A-law, mu-law, ADPCM and WAV with more than 8 channels are not supported.
+- ARM64 speed and real hardware are still unmeasured; the new codec was run under QEMU only.
+
 ## 0.4.0
 
 **Built from Peep 0.2.11.** Full-resolution FLAC output and a sturdier decoder, on x86-64 and ARM64.
