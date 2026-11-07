@@ -1,4 +1,4 @@
-; Liberated Peep 0.1.0: Peep's playback kernel. See peep.h for the API.
+; Liberated Peep 0.1.1: Peep's playback kernel. The API is in the README (API reference).
 ;
 ; Freestanding: no libc, no malloc, no syscalls, no writable globals.
 ; Assembles for System V (Linux/macOS-style) and Microsoft x64 (-DWIN64).
@@ -8,7 +8,7 @@
 
 %include "abi.inc"
 
-; struct peep (peep.h)
+; struct peep (the C declarations are in the README, API reference)
 P_CODEC  equ 0
 P_SRC    equ 8
 P_LEN    equ 16

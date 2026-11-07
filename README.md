@@ -7,7 +7,7 @@ kernel, set free from the player. Peep is a music player that is just a screen;
 Liberated Peep is what is left when you take the screen away: the part that turns
 an audio file into samples, small enough to drop into any program that can call C.
 
-Version **0.1.0**, built from **Peep 0.2.11**.
+Version **0.1.1**, built from **Peep 0.2.11**.
 
 * **5.5 KB of x86-64 assembly** for WAV and FLAC together
 * **No libc, no `malloc`, no threads, no system calls, no global state**
@@ -17,7 +17,7 @@ Version **0.1.0**, built from **Peep 0.2.11**.
 * Works with **any GUI or engine**: Qt, GTK, SDL, JUCE, a game, a terminal, a kernel module
 
 ```c
-#include "peep.h"
+// declarations: see "API reference" below
 
 peep p;
 const peep_codec *codecs[] = { &peep_codec_flac, NULL };      // WAV is built in
@@ -36,17 +36,18 @@ peep_seek(&p, frame);  peep_close(&p);
 
 ## Build
 
-You need `nasm` and a linker.
+You need `nasm` and a linker. This repository is assembly only, so there is no build system: assemble the
+files and link the objects into your program.
 
 ```sh
-make            # build/libpeep.a   (peep.o = core + WAV, flac.o = FLAC)
-make win        # Win64 objects (build/peep.obj, build/flac.obj)
+nasm -f elf64 peep.asm -o peep.o                 # Linux / BSD: the core and WAV
+nasm -f elf64 flac.asm -o flac.o                 # optional: FLAC
+nasm -f win64 -DWIN64 peep.asm -o peep.obj       # Windows (same for flac.asm)
+cc app.c peep.o flac.o -o app                    # link with your program
 ```
 
-Link `libpeep.a`, `#include "peep.h"`. The two objects are separate in the archive, so a
-program that never mentions `peep_codec_flac` does not link the FLAC code. Or skip
-the build system: assemble `peep.asm` and `flac.asm` yourself
-(`nasm -f elf64 peep.asm`; add `-f win64 -DWIN64` for Windows).
+`peep.asm` and `flac.asm` are separate objects, so a program that never mentions `peep_codec_flac` does not
+need `flac.o` at all. Add `ar rcs libpeep.a peep.o flac.o` if you want a static library.
 
 ## What is in it
 
@@ -55,14 +56,105 @@ the build system: assemble `peep.asm` and `flac.asm` yourself
 | `peep.asm` | 1.3 KB | `peep_open / fill / seek / close`, built-in 16-bit PCM WAV (plain, extensible, odd chunks, unknown length, truncated), volume, channel mapping to stereo |
 | `flac.asm` | 4.2 KB | native FLAC decoder: 4 to 24 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table |
 | `abi.inc` | | System V and Microsoft x64 glue, so one source builds for both |
-| `peep.h` | | the whole public API |
-| `examples/codec_drflac.c` | | a 20-line codec adapter (wraps `dr_flac`): the model for adding any other format |
+
+## API reference
+
+There is no header file in this repository (it is assembly only). Copy these C declarations into your own
+code, or translate them to your language: the library is a plain C ABI.
+
+```c
+/* Liberated Peep (lib-Peep): Peep's playback kernel as a library.  "Audio for All"
+ * Version 0.1.0, built from Peep 0.2.11. Public domain (Unlicense), see LICENSE.
+ *
+ * Freestanding x86-64 assembly: no libc, no malloc, no threads, no OS calls.
+ * You own all memory. Pull-based: your audio callback calls peep_fill().
+ *
+ * Output is always interleaved stereo int16 at peep_rate(); the volume is a
+ * q8 gain (0..256) applied in the same pass that reads the samples.
+ * Built in: 16-bit PCM WAV (incl. WAVE_FORMAT_EXTENSIBLE), decoded straight
+ * from your memory with no copy. Anything else comes from a plugged-in codec.
+ */
+#ifndef PEEP_H
+#define PEEP_H
+#include <stddef.h>
+#include <stdint.h>
+#define LIBPEEP_VERSION "0.1.0"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct peep peep;
+
+/* A codec. Fill p->rate, p->channels (1..8) and p->total (frames, 0 = unknown)
+ * in open(). p->ctx and p->state[] are yours; p->src/p->len are the file.
+ * read() returns interleaved int16 in the file's own channel count, up to
+ * `frames` frames; 0 means end of stream. seek and close may be NULL.
+ * Peep maps any channel count to stereo (mono is duplicated, 3+ uses the
+ * first two channels). */
+typedef struct peep_codec {
+    int    (*open)(peep *p, const void *data, size_t len);  /* nonzero = mine */
+    size_t (*read)(peep *p, int16_t *out, size_t frames);
+    void   (*seek)(peep *p, uint64_t frame);
+    void   (*close)(peep *p);
+} peep_codec;
+
+/* 160 bytes. The fields are public: read them, and set only `gain`. */
+struct peep {
+    const peep_codec *codec;   /*   0  */
+    const uint8_t    *src;     /*   8  the file in memory */
+    size_t            len;     /*  16 */
+    uint64_t          pos;     /*  24  frame cursor */
+    uint64_t          total;   /*  32  frames, 0 = unknown */
+    uint32_t          rate;    /*  40  Hz */
+    uint32_t          channels;/*  44  of the source */
+    uint32_t          gain;    /*  48  q8: 256 = unity, 0 = silence (max 256) */
+    uint32_t          kind;    /*  52  0 closed, 1 built-in WAV, 2 codec */
+    const uint8_t    *data;    /*  56  built-in WAV: first sample */
+    void             *ctx;     /*  64  codec use */
+    uint8_t           state[56]; /* 72  codec use */
+    void             *work;    /* 128  workspace you lent to peep_open */
+    size_t            work_size;/* 136 */
+    size_t            work_need;/* 144 bytes a codec wanted; valid after a failed open */
+    uint64_t          reserved;/* 152 */
+};
+
+/* codecs: NULL-terminated array tried in order after the built-in WAV
+ * (may be NULL). The memory at `data` must stay valid until peep_close().
+ *
+ * work, work_size: scratch memory for codecs that need some (FLAC needs
+ * channels * max_blocksize * 4 + 16 bytes, typically 36 KB). It must stay valid until
+ * peep_close(). Built-in WAV needs none. If a codec finds it too small, open
+ * fails and p->work_need says how many bytes it wanted, so you can allocate
+ * and call again.
+ *
+ * Returns 1 on success, 0 if no decoder accepts the data. */
+int    peep_open (peep *p, const peep_codec *const *codecs, const void *data, size_t len,
+                  void *work, size_t work_size);
+
+/* Write up to `frames` stereo frames (4 bytes each) to `out`. Returns the
+ * number written; 0 = end of stream. A short count before the end is
+ * allowed, so fill the rest with silence if your callback needs it. */
+size_t peep_fill (peep *p, int16_t *out, size_t frames);
+
+void   peep_seek (peep *p, uint64_t frame);   /* clamps to the end */
+void   peep_close(peep *p);
+
+/* Native assembly FLAC (flac.asm), up to 24 bits per sample, 1 to 8 channels. */
+extern const peep_codec peep_codec_flac;
+
+static inline void peep_set_gain(peep *p, unsigned q8) { p->gain = q8 > 256 ? 256 : q8; }
+
+#ifdef __cplusplus
+}
+#endif
+#endif
+```
 
 ## Adding a codec
 
 A codec is four function pointers: `open`, `read`, `seek`, `close`. Hand `peep_open` a
-NULL-terminated list of them. `examples/codec_drflac.c` shows a complete adapter;
-`flac.asm` is the same interface written in assembly. A codec that needs memory reads
+NULL-terminated list of them. `flac.asm` is a complete codec written in assembly. A codec that needs memory reads
 `p->work` and reports what it wants in `p->work_need`. See `AGENTS.md` for the contract.
 
 ## Speed
@@ -102,7 +194,15 @@ with volume applied. Code size: 4.2 KB for FLAC against about 90 KB of `dr_flac`
 
 ## Tests
 
-`make test` runs all of these (needs `python3` with `numpy`; ffmpeg is not needed):
+This repository holds only the library (assembly) and its documentation. The test suite, which is written in
+C and Python, is not kept here; it lives in git history and on the `arm64` branch:
+
+```sh
+git switch arm64          # same x86-64 sources plus the tools; also has the ARM64 port
+make test                 # needs python3 with numpy
+```
+
+(or `git checkout 7c347e6 -- tools Makefile peep.h examples third_party` on this branch). It contains:
 
 * `tools/mkflac.py`: a randomised FLAC **encoder** that uses every feature of the format and
   knows the exact PCM it wrote, so the decoder is checked against ground truth (all 11
@@ -111,16 +211,15 @@ with volume applied. Code size: 4.2 KB for FLAC against about 90 KB of `dr_flac`
   escape partitions, very long unary runs, extra metadata, unknown length, random seeks)
 * `tools/testwav.py`: 2,505 checks of the WAV path
 * `tools/fuzz.c`: a mutation fuzzer that puts the input and the workspace against unmapped
-  guard pages and has a hang watchdog (`make fuzz` runs a long one)
-* `make build/peepdump.exe` builds the Windows test tool (needs mingw-w64); run it under `wine`
-  on the same files and compare with the Linux output
+  guard pages and has a hang watchdog
 
 Results at 0.1.0: thousands of random streams and seeks with zero failures; 16 million fuzz
 inputs (about 32 billion frames decoded) with no crash, hang or out-of-bounds access; clean
 under valgrind; identical output to `dr_flac` on every real ffmpeg-encoded file tried
 (levels 0 to 12, mono, 5.1, 96 kHz, 24-bit); the Windows build passes the same corpus under
 Wine. The decoder was deliberately broken in 39 ways; 35 were caught and the other 4 turned
-out not to change the output.
+out not to change the output. The assembly was not changed by the 0.1.1 cleanup (the objects are
+byte-identical) and the suite was re-run against it.
 
 ## For AI agents
 
@@ -128,6 +227,4 @@ Read [`AGENTS.md`](AGENTS.md).
 
 ## License
 
-Public domain, under the [Unlicense](LICENSE), like Peep. `third_party/dr_flac.h` is David
-Reid's `dr_flac` (public domain or MIT-0, at your option); it is used only by the example
-adapter and the test tools, never by the library.
+Public domain, under the [Unlicense](LICENSE), like Peep.

@@ -2,6 +2,22 @@
 
 All notable changes to Liberated Peep.
 
+## 0.1.1
+
+**Built from Peep 0.2.11.** The repository is now assembly (and documentation) only. The library is unchanged.
+
+### Removed
+- Everything that was not assembly: the C header `peep.h`, the `Makefile`, `examples/codec_drflac.c`, the
+  vendored `third_party/dr_flac.h`, and the test tools in `tools/` (`mkflac.py`, `testwav.py`, `fuzz.c`,
+  `peepdump.c`, `bench.c`).
+- Nothing the library does depends on them: `peep.asm` and `flac.asm` assemble to byte-identical
+  objects before and after, and the full test suite (run from the removed tools) still passes.
+
+### Changed
+- The C declarations that were in `peep.h` are now in the README's "API reference", as documentation to copy.
+- The README and `AGENTS.md` give the `nasm` commands instead of `make`, and say where the removed test
+  suite lives: git history (commit `7c347e6`) and the `arm64` branch.
+
 ## 0.1.0
 
 First release. **Built from Peep 0.2.11.**

@@ -1,6 +1,6 @@
 # AGENTS.md: using Liberated Peep (lib-Peep) in a project
 
-For AI coding agents. Liberated Peep ("Audio for All", version 0.1.0, built from Peep
+For AI coding agents. Liberated Peep ("Audio for All", version 0.1.1, built from Peep
 0.2.11) is a tiny audio-decoding library: you give it the bytes of a WAV or FLAC file and it
 hands back stereo 16-bit samples, on demand. It plays nothing by itself; your program sends
 the samples to a sound device.
@@ -16,7 +16,7 @@ the samples to a sound device.
 
 ## Add it to a project
 
-Copy `peep.h`, `peep.asm` and `abi.inc` (and `flac.asm` if you want FLAC). Assemble with
+Copy `peep.asm` and `abi.inc` (and `flac.asm` if you want FLAC). Assemble with
 `nasm` and link the objects:
 
 ```sh
@@ -26,11 +26,11 @@ nasm -f win64 -DWIN64 peep.asm -o peep.obj       # Windows (same for flac.asm)
 cc app.c peep.o flac.o -o app
 ```
 
-`make` in this repo does the same and builds `build/libpeep.a`. It is a C ABI, so any
-language that can call C can use it. The library has no dependencies; `third_party/dr_flac.h`
-is only for the example adapter and the tests.
+It is a C ABI, so any language that can call C can use it. The library has no dependencies. This
+repository is assembly only on purpose, so there is no C header and no Makefile: copy the declarations from
+the "API reference" section of `README.md` into your own code (or translate them to your language).
 
-## The whole API (`peep.h`)
+## The whole API
 
 ```c
 peep p;                                         // 160 bytes; the caller owns it
@@ -66,7 +66,7 @@ Rules that matter:
 * **Real-time:** `peep_fill` and `peep_seek` do not allocate, lock or call the OS, so they are
   fine in an audio callback. A FLAC seek scans frame headers (a binary search) and decodes one
   frame; do it off the audio thread if you need hard real-time guarantees. Do `peep_open`
-  off the audio thread as well (the dr_flac example adapter calls `malloc`).
+  off the audio thread as well (a codec you plug in may allocate; the built-in ones do not).
 * **Rejected input is not an error to crash on.** `peep_open` returns 0 for anything it cannot
   play. Damaged FLAC frames are skipped, so playback continues; fuzzing with 16 million
   mutated inputs found no read or write out of bounds.
@@ -102,13 +102,14 @@ What each piece is:
 |---|---|---|
 | WAV, 16-bit PCM | `peep.asm` (built in) | Peep's own decoder, carried over unchanged. The simplest format, so the kernel is useful on its own with no codec at all. It reads straight from your memory and applies volume in the same pass. |
 | FLAC | `flac.asm` (`peep_codec_flac`) | The most widely used lossless format, and the one where a freestanding native decoder pays off most: it is where the dependency, memory and size cost of a C decoder is greatest. |
-| `dr_flac` adapter | `examples/codec_drflac.c` | Not part of the library. It is (1) the model for plugging in any other decoder, (2) the reference the native decoder is compared against in the tests, and (3) the fallback for FLAC above 24 bits per sample, which the native decoder rejects. (The core is x86-64 only, so it is not a way to run on other CPUs.) |
 
 ## Other formats (MP3, Vorbis, ...)
 
-Not included in 0.1.0, and there is no adapter for them in this repository. Peep's own repository
-vendors `dr_mp3` and `stb_vorbis`. To use them here, write an adapter in the style of
-`examples/codec_drflac.c` (about 20 lines) and pass it in the `codecs` list. Those C libraries
+Not included in this release, and there is no adapter for them in this repository. Peep's own repository
+vendors `dr_mp3` and `stb_vorbis`. To use them here, write a small adapter with the four-function
+`peep_codec` interface below (about 20 lines in C around an existing decoder) and pass it in the `codecs`
+list. A `dr_flac` adapter was the worked example; it was removed from this branch to keep it assembly only,
+but it is on the `arm64` branch (`examples/codec_drflac.c`) and in commit `7c347e6`. Those C libraries
 allocate memory, so open them off the audio thread. A native MP3 decoder is the likely next step.
 
 ## Writing a codec
@@ -137,18 +138,20 @@ typedef struct peep_codec {
 
 ## If you modify this repository
 
-* The `peep` struct layout is written in **three places that must agree**: `peep.h`, the `P_*`
-  constants at the top of `peep.asm`, and the `P_*` / `S_*` constants at the top of `flac.asm`.
-  Change one, change all, then run the tests.
-* Run `make test` after every change (needs `python3` with `numpy`). After touching `flac.asm` also
-  run `make fuzz`. Windows changes can be checked under Wine: `make build/peepdump.exe` (needs mingw-w64),
-  then run it with `wine` on the same files and compare the output with the Linux build.
+* The `peep` struct layout is written in **three places that must agree**: the C declarations in the
+  "API reference" of `README.md`, the `P_*` constants at the top of `peep.asm`, and the `P_*` / `S_*`
+  constants at the top of `flac.asm`. Change one, change all, then run the tests.
+* **The test suite is not on this branch** (it is C and Python; this branch is assembly only). Get it with
+  `git switch arm64` (same x86-64 sources plus the tools) and run `make test` (needs `python3` with
+  `numpy`) and, after touching `flac.asm`, `make fuzz`; or check it out here with
+  `git checkout 7c347e6 -- tools Makefile peep.h examples third_party`. Do not commit those files back
+  to this branch. Windows changes can be checked under Wine with `make build/peepdump.exe`.
 * A decoder is only correct if it matches ground truth. `tools/mkflac.py` is the oracle for FLAC: it
   knows the exact PCM it encoded. A good habit is to break the decoder on purpose and confirm the
   tests fail.
 * The decoder registers are fixed by convention (documented at the top of `flac.asm`): `rbx` is the
   `peep`, `r12` to `r15` are the bit reader. Internal routines clobber only what their comments say.
-* Measure speed on an idle machine (`make build/bench`, `build/bench file [dr|native]`) and say what you
+* Measure speed on an idle machine (`make build/bench`, `build/bench file [dr|native]`, from the test tools) and say what you
   measured. Do not claim a speed-up from instruction counts alone: the prediction loop here was
   limited by memory latency, not instruction count.
 
