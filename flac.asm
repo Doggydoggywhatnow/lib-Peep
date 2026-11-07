@@ -86,6 +86,9 @@ L_CRC    equ 432                  ; the CRC-16 stored in the frame
 L_WIDE   equ 440                  ; 0: read() int16, 1: read32() int32
 L_ESCP   equ 448                  ; escape partition: where it starts
 L_ESCN   equ 456                  ; and how many samples it holds
+L_PB     equ 464                  ; LPC: bytes in the (padded) window, 4 * P
+L_PM4    equ 472                  ; LPC: P - 4, the taps the loops handle before the newest four
+L_MODE   equ 480                  ; residual loop flavour: 0 none, 1 fixed predictor, 2 LPC scalar, 3 LPC SSE4.1
 
 section .text
 
@@ -509,6 +512,203 @@ ff_scan:
 ; Fixed predictors (order 1 to 4) are applied here, in the same loop, as each sample is decoded: the predictor's
 ; short dependency chain then runs alongside the bit reader's instead of in a second pass. esi = the previous sample.
 ; ============================================================================
+
+; ----------------------------------------------------------------------------
+; RICE entry, mode: the Rice residual loop for one partition, with the prediction done in the same loop as each sample is decoded
+; (the predictor's dependency chain then runs alongside the bit reader's instead of in a second pass). One copy per mode so the loop
+; itself has no mode tests.  mode 0: none (order 0)   1: fixed predictor, orders 1 to 4   2: LPC, scalar   3: LPC, SSE4.1 (older taps)
+; In: r9d = samples left in the partition, r10d = Rice parameter k, rdi = output, esi = previous sample, r12 to r15 = bit reader.
+; ----------------------------------------------------------------------------
+%macro RICE 2
+%1:
+%%rs:
+    cmp  r14d, 32
+    jb   %%rf1
+%%c1:
+    bsr  rax, r13                     ; unary part: leading zero bits
+    jz   %%long
+    xor  eax, 63                      ; q
+    lea  edx, [rax + r10 + 1]         ; t = q + 1 + k bits for this sample
+    cmp  edx, r14d
+    ja   %%more                       ; not all in the cache: slow path
+    mov  r8, r13                      ; value, computed from the old cache:
+    mov  ecx, 64                      ;   V = top t bits = (1 << k) | low
+    sub  ecx, edx
+    shr  r8, cl
+    lea  r11, [rax - 1]               ;   u = V + ((q - 1) << k)
+    mov  ecx, r10d
+    shl  r11, cl
+    add  r8, r11
+    mov  ecx, edx                     ; the only loop-carried work of the bit reader: drop t bits
+    shl  r13, cl
+    sub  r14d, edx
+%%zz:
+    mov  rax, r8
+    shr  rax, 1
+    and  r8d, 1
+    neg  r8
+    xor  rax, r8                      ; zig-zag: (u >> 1) ^ -(u & 1): eax = the residual
+%if %2 == 0
+    mov  [rdi], eax
+    add  rdi, 4
+    dec  r9d
+    jnz  %%rs
+    jmp  .pdone
+%elif %2 == 1
+    mov  edx, LOC(L_FIX)
+    cmp  edx, 2
+    jb   %%p1
+    je   %%p2
+    cmp  edx, 3
+    je   %%p3
+%%p4:mov  edx, [rdi - 12]             ; order 4: 4(c1 + c3) - 6c2 - c4 (older samples are read back from the plane)
+    add  edx, esi
+    shl  edx, 2
+    mov  r8d, [rdi - 8]
+    lea  r8d, [r8 + r8 * 2]
+    add  r8d, r8d
+    sub  edx, r8d
+    sub  edx, [rdi - 16]
+    add  eax, edx
+    jmp  %%st
+%%p3:mov  edx, esi                    ; order 3: 3(c1 - c2) + c3
+    sub  edx, [rdi - 8]
+    lea  edx, [rdx + rdx * 2]
+    add  edx, [rdi - 12]
+    add  eax, edx
+    jmp  %%st
+%%p2:lea  edx, [rsi + rsi]            ; order 2: 2c1 - c2
+    sub  edx, [rdi - 8]
+    add  eax, edx
+    jmp  %%st
+%%p1:add  eax, esi                    ; order 1: c1
+%%st:mov  esi, eax
+    mov  [rdi], eax
+    add  rdi, 4
+    dec  r9d
+    jnz  %%rs
+    jmp  .pdone
+%else
+    mov  r8d, eax                     ; the residual
+    mov  r11d, LOC(L_PB)
+    neg  r11
+    add  r11, rdi                     ; window start: x[i - P]
+    xor  ecx, ecx
+%if %2 == 3
+    pxor xmm0, xmm0                   ; SSE4.1: 4 taps per pass as two 2-lane signed 32x32 -> 64 multiplies (coefficients are 64-bit slots holding int32)
+%%macv:
+    movdqu xmm1, [r11 + rcx * 4]      ; at least 4 samples old, so long since stored (no store-forwarding stall)
+    movdqa xmm2, xmm1
+    punpckldq xmm1, xmm1
+    punpckhdq xmm2, xmm2
+    pmuldq xmm1, [rbp - 576 + rcx * 8]            ; L_COEF is 0 and 16-byte aligned
+    pmuldq xmm2, [rbp - 576 + rcx * 8 + 16]
+    paddq xmm0, xmm1
+    paddq xmm0, xmm2
+    add  ecx, 4
+    cmp  ecx, LOC(L_PM4)
+    jb   %%macv
+    movhlps xmm1, xmm0
+    paddq xmm0, xmm1
+    movq rdx, xmm0
+%else
+    xor  edx, edx                     ; scalar: 4 multiply-adds per pass, oldest samples first
+    cmp  ecx, LOC(L_PM4)
+    jae  %%tail
+%%mac:
+    movsxd rax, dword [r11 + rcx * 4]
+    imul rax, [rbp - 576 + rcx * 8]
+    add  rdx, rax
+    movsxd rax, dword [r11 + rcx * 4 + 4]
+    imul rax, [rbp - 576 + rcx * 8 + 8]
+    add  rdx, rax
+    movsxd rax, dword [r11 + rcx * 4 + 8]
+    imul rax, [rbp - 576 + rcx * 8 + 16]
+    add  rdx, rax
+    movsxd rax, dword [r11 + rcx * 4 + 12]
+    imul rax, [rbp - 576 + rcx * 8 + 24]
+    add  rdx, rax
+    add  ecx, 4
+    cmp  ecx, LOC(L_PM4)
+    jb   %%mac
+%endif
+%%tail:                               ; the newest four taps: x[i-4..i-2] from memory, x[i-1] from the register
+    movsxd rax, dword [r11 + rcx * 4]
+    imul rax, [rbp - 576 + rcx * 8]
+    add  rdx, rax
+    movsxd rax, dword [r11 + rcx * 4 + 4]
+    imul rax, [rbp - 576 + rcx * 8 + 8]
+    add  rdx, rax
+    movsxd rax, dword [r11 + rcx * 4 + 8]
+    imul rax, [rbp - 576 + rcx * 8 + 16]
+    add  rdx, rax
+    movsxd rax, esi
+    imul rax, [rbp - 576 + rcx * 8 + 24]
+    add  rdx, rax
+    mov  ecx, LOC(L_SHIFT)
+    sar  rdx, cl
+    add  r8d, edx                     ; residual + prediction, int32 wrap
+    mov  esi, r8d
+    mov  [rdi], r8d
+    add  rdi, 4
+    dec  r9d
+    jnz  %%rs
+    jmp  .pdone
+%endif
+%%more:                               ; eax = q: consume the unary part, then top up for the rest
+    mov  r8d, eax
+    mov  ecx, eax
+    shl  r13, cl
+    shl  r13, 1
+    inc  ecx
+    sub  r14d, ecx
+%%kc:
+    cmp  r14d, r10d
+    jb   %%rf2
+%%c2:
+    mov  rax, r13
+    shr  rax, 1
+    mov  ecx, 63
+    sub  ecx, r10d
+    shr  rax, cl                      ; k low bits
+    mov  ecx, r10d
+    shl  r13, cl
+    sub  r14d, r10d
+    shl  r8, cl
+    or   r8, rax                      ; u = q << k | low
+    jmp  %%zz
+%%rf1:
+    call br_refill
+    jmp  %%c1
+%%rf2:
+    call br_refill
+    jmp  %%c2
+%%long:                               ; the cache holds only zeros: keep counting
+    mov  r8, r14
+    xor  r13d, r13d
+    xor  r14d, r14d
+%%lg:
+    lea  rax, [r15 + 16]
+    cmp  r12, rax
+    ja   .bad                         ; ran far past the end of the file
+    call br_refill
+    bsr  rax, r13
+    jnz  %%lgf
+    add  r8, r14
+    xor  r13d, r13d
+    xor  r14d, r14d
+    jmp  %%lg
+%%lgf:
+    mov  ecx, 63
+    sub  ecx, eax
+    add  r8, rcx
+    shl  r13, cl
+    shl  r13, 1
+    inc  ecx
+    sub  r14d, ecx
+    jmp  %%kc
+%endmacro
+
 decode_residual:
     mov  ecx, 2
     call br_get
@@ -535,6 +735,24 @@ decode_residual:
     mov  rdi, LOC(L_PLANE)
     mov  eax, LOC(L_ORDER)
     lea  rdi, [rdi + rax * 4]
+    mov  eax, LOC(L_FIX)              ; which loop: 1 fixed predictor, else LPC (2 scalar, 3 SSE4.1) or none for order 0
+    test eax, eax
+    jnz  .mfixed
+    cmp  dword LOC(L_ORDER), 0
+    je   .modeset                     ; order 0: eax is already 0
+    mov  eax, 2
+%ifndef NOSIMD
+    test dword [rbx + S_SIBPS], SIMDF
+    jz   .modeset
+    cmp  dword LOC(L_PM4), 0
+    je   .modeset
+    mov  eax, 3
+%endif
+    jmp  .modeset
+.mfixed:
+    mov  eax, 1
+.modeset:
+    mov  LOC(L_MODE), eax
 .part:
     mov  esi, [rdi - 4]               ; previous sample (fixed predictors); front slack makes order 0 safe too
     mov  ecx, LOC(L_PBITS)
@@ -548,114 +766,23 @@ decode_residual:
     je   .escape
     test r9d, r9d
     jz   .pdone
-.rs:cmp  r14d, 32
-    jb   .rf1
-.c1:bsr  rax, r13                     ; unary part: leading zero bits
-    jz   .long
-    xor  eax, 63                      ; q
-    lea  edx, [rax + r10 + 1]         ; t = q + 1 + k bits for this sample
-    cmp  edx, r14d
-    ja   .more                        ; not all in the cache: slow path
-    mov  r8, r13                      ; value, computed from the old cache:
-    mov  ecx, 64                      ;   V = top t bits = (1 << k) | low
-    sub  ecx, edx
-    shr  r8, cl
-    lea  r11, [rax - 1]               ;   u = V + ((q - 1) << k)
-    mov  ecx, r10d
-    shl  r11, cl
-    add  r8, r11
-    mov  ecx, edx                     ; the only loop-carried work: drop t bits
-    shl  r13, cl
-    sub  r14d, edx
-.zz:mov  rax, r8
-    shr  rax, 1
-    and  r8d, 1
-    neg  r8
-    xor  rax, r8                      ; zig-zag: (u >> 1) ^ -(u & 1)
-    mov  edx, LOC(L_FIX)
-    test edx, edx
-    jz   .st                          ; LPC or order 0: predicted later, in predict
-    cmp  edx, 2
-    jb   .p1
-    je   .p2
-    cmp  edx, 3
-    je   .p3
-.p4:mov  edx, [rdi - 12]              ; order 4: 4(c1 + c3) - 6c2 - c4 (older samples are read back from the plane)
-    add  edx, esi
-    shl  edx, 2
-    mov  r8d, [rdi - 8]
-    lea  r8d, [r8 + r8 * 2]
-    add  r8d, r8d
-    sub  edx, r8d
-    sub  edx, [rdi - 16]
-    add  eax, edx
-    jmp  .st
-.p3:mov  edx, esi                     ; order 3: 3(c1 - c2) + c3
-    sub  edx, [rdi - 8]
-    lea  edx, [rdx + rdx * 2]
-    add  edx, [rdi - 12]
-    add  eax, edx
-    jmp  .st
-.p2:lea  edx, [rsi + rsi]             ; order 2: 2c1 - c2
-    sub  edx, [rdi - 8]
-    add  eax, edx
-    jmp  .st
-.p1:add  eax, esi                     ; order 1: c1
-.st:mov  esi, eax
-    mov  [rdi], eax
-    add  rdi, 4
-    dec  r9d
-    jnz  .rs
-    jmp  .pdone
-.more:                                ; eax = q: consume the unary part, then top up for the rest
-    mov  r8d, eax
-    mov  ecx, eax
-    shl  r13, cl
-    shl  r13, 1
-    inc  ecx
-    sub  r14d, ecx
-.kc:cmp  r14d, r10d
-    jb   .rf2
-.c2:mov  rax, r13
-    shr  rax, 1
-    mov  ecx, 63
-    sub  ecx, r10d
-    shr  rax, cl                      ; k low bits
-    mov  ecx, r10d
-    shl  r13, cl
-    sub  r14d, r10d
-    shl  r8, cl
-    or   r8, rax                      ; u = q << k | low
-    jmp  .zz
-.rf1:
-    call br_refill
-    jmp  .c1
-.rf2:
-    call br_refill
-    jmp  .c2
-.long:                                ; the cache holds only zeros: keep counting
-    mov  r8, r14
-    xor  r13d, r13d
-    xor  r14d, r14d
-.lg:lea  rax, [r15 + 16]
-    cmp  r12, rax
-    ja   .bad                         ; ran far past the end of the file
-    call br_refill
-    bsr  rax, r13
-    jnz  .lgf
-    add  r8, r14
-    xor  r13d, r13d
-    xor  r14d, r14d
-    jmp  .lg
-.lgf:
-    mov  ecx, 63
-    sub  ecx, eax
-    add  r8, rcx
-    shl  r13, cl
-    shl  r13, 1
-    inc  ecx
-    sub  r14d, ecx
-    jmp  .kc
+    mov  eax, LOC(L_MODE)
+    test eax, eax
+    jz   .rs0
+    cmp  eax, 2
+    jb   .rs1
+%ifndef NOSIMD
+    je   .rs2
+    jmp  .rs3
+%else
+    jmp  .rs2
+%endif
+    RICE .rs0, 0
+    RICE .rs1, 1
+    RICE .rs2, 2
+%ifndef NOSIMD
+    RICE .rs3, 3
+%endif
 .escape:                              ; partition stored as n-bit signed integers
     mov  ecx, 5
     call br_get
@@ -680,10 +807,18 @@ decode_residual:
 .edone:
     mov  eax, LOC(L_FIX)
     test eax, eax
-    jz   .pdone
-    mov  rsi, LOC(L_ESCP)             ; predict only this region (its history is in the plane before it)
+    jnz  .efix
+    cmp  dword LOC(L_ORDER), 0
+    je   .pdone
+    mov  rsi, LOC(L_ESCP)             ; LPC: predict only this region (its history is in the plane before it)
     mov  r9d, LOC(L_ESCN)
-    call predict.fixed_at
+    call lpc_run
+    jmp  .erest
+.efix:
+    mov  rsi, LOC(L_ESCP)             ; fixed predictor: the same for the region
+    mov  r9d, LOC(L_ESCN)
+    call lpc_run.fixed_at
+.erest:
     mov  rdi, LOC(L_ESCP)
     mov  eax, LOC(L_ESCN)
     lea  rdi, [rdi + rax * 4]
@@ -701,16 +836,9 @@ decode_residual:
 ; LPC / fixed prediction, in place. 64-bit accumulator, so any precision and
 ; any sample width is exact.
 ; ============================================================================
-predict:
+; lpc_prep: once per LPC subframe, before decode_residual: pad the coefficients to a multiple of 4 taps (zeros on the old side) and record the window size.
+lpc_prep:
     mov  r8d, LOC(L_ORDER)
-    test r8d, r8d
-    jz   .done
-    mov  r9d, LOC(L_BS)
-    sub  r9d, r8d
-    jbe  .done
-    mov  eax, LOC(L_FIX)
-    test eax, eax
-    jnz  .done                        ; a fixed predictor was already applied inside decode_residual
     lea  rdi, LOC(L_COEF)
     lea  eax, [r8 + 3]
     and  eax, -4                      ; P = order rounded up to a multiple of 4
@@ -729,12 +857,21 @@ predict:
     cmp  ecx, edx
     jb   .zp
 .padded:
-    mov  r11, LOC(L_PLANE)
-    lea  rsi, [r11 + r8 * 4]          ; output: x[i], first predicted sample
-    shl  rdx, 2
-    sub  r11, rdx                     ; window start x[order - P] (up to 3 slots of front slack)
+    lea  edx, [rax * 4]
+    mov  LOC(L_PB), edx
+    lea  edx, [rax - 4]
+    mov  LOC(L_PM4), edx
+    ret
+
+; lpc_run: LPC prediction over a region, in place: rsi = &x[start], r9d = count (>= 1). The whole-subframe case is done inside decode_residual;
+; this is for escape-coded partitions. 64-bit accumulator, so any precision and any sample width is exact.
+lpc_run:
+    mov  r11d, LOC(L_PB)
+    neg  r11
+    add  r11, rsi                     ; window start x[start - P] (up to 3 slots of front slack)
     movsxd r10, dword [rsi - 4]       ; x[i-1] lives in a register: no store->load round trip
-    lea  r8d, [rax - 4]               ; the last 4 window slots are handled outside the loop
+    mov  r8d, LOC(L_PM4)              ; the last 4 window slots are handled outside the loop
+    lea  rdi, LOC(L_COEF)
 %ifndef NOSIMD
     test dword [rbx + S_SIBPS], SIMDF
     jz   .sample
@@ -1002,10 +1139,14 @@ decode_subframe:
     dec  r11d
     jnz  .cf
 .resid:
-    call decode_residual
+    cmp  dword LOC(L_FIX), 0
+    jne  .rr
+    cmp  dword LOC(L_ORDER), 0
+    je   .rr
+    call lpc_prep                     ; LPC: pad the coefficients; decode_residual then predicts as it decodes
+.rr:call decode_residual
     test eax, eax
     jz   .bad
-    call predict
 .wasted:
     mov  ecx, LOC(L_WASTED)
     test ecx, ecx

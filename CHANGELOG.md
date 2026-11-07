@@ -44,6 +44,20 @@ All notable changes to Liberated Peep.
 - Not done: ARM64 (NEON always present, so no detection needed); LPC fused with residual decoding; faster order-8 prediction, which is where the default-level files
   (24-bit, 96 kHz, level 5) still spend their time. Measured on a shared VM, not an idle machine.
 
+### Experiment (dev branch): LPC prediction fused into the residual loop, x86-64 only
+- `flac.asm`: the Rice residual loop is now a macro expanded four times (no prediction, fixed predictor, LPC scalar, LPC with SSE4.1), chosen once per subframe, so each
+  sample's prediction is computed in the same loop as it is decoded and the predictor's dependency chain overlaps the bit reader's. Before this the whole block was predicted in a second
+  pass. `predict` became `lpc_prep` (pads the coefficients, once per subframe) and `lpc_run` (LPC over a region, used for escape-coded partitions). No API, struct, workspace or output change;
+  the code grew by about 1 KB (four loop copies).
+- Why: counting instructions per cycle (clock measured at about 3.7 GHz) showed 24-bit and default-level files ran at about 3.1 instructions per cycle against about 4.2 for `dr_flac`
+  on nearly the same instruction count, so the time was stalls, not work.
+- Measured against the previous `dev` build and `dr_flac` (same machine, alternating runs, min of 7): level 5 (the default 16-bit) **+23%** (from 12% slower than `dr_flac` to **6% faster**),
+  96 kHz **+25%** (from 18% slower to **3% faster**), level 8 +15%, level 12 +13%, mono +19%, 5.1 +15%, 24-bit +19% (still **14% slower than `dr_flac`**); levels 0 and 2 (fixed predictors) unchanged
+  and still 8 to 10% slower.
+- Tests: `make test` (x86-64) passes in full, including the 300 random streams with escape partitions, the audio suite, `make test-simd` and 200,000 fuzz inputs.
+- Not done: the ARM64 port (`arm64/flac.s` still predicts in a second pass, so the two ports now differ on `dev`); breakage testing of the new loops; 24-bit and the fixed-predictor files still behind `dr_flac`.
+  Measured on a shared x86-64 VM.
+
 ### Added (dev branch): compressed WAV codec, `peep_codec_wavc`
 - `wavc.asm` and `arm64/wavc.s` (about 2.5 KB each), pure assembly: **A-law** (tag 6) and **mu-law** (tag 7), 1 to 8 channels, plain or extensible headers;
   **IMA ADPCM** (0x11) and **Microsoft ADPCM** (2), mono or stereo. Output is 16-bit (`p->bits` = 16, `read32` is each sample << 16). ADPCM needs an 80-byte workspace
