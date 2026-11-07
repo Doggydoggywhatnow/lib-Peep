@@ -214,6 +214,13 @@ It contains:
   24 bit, constant / verbatim / fixed / LPC subframes, wasted bits, both Rice methods,
   escape partitions, very long unary runs, extra metadata, unknown length, random seeks)
 * `tools/testwav.py`: 2,505 checks of the WAV path
+* `make test-audio` (also part of `make test`): tests for stutter, clicks, crackle and garbling. `tools/testaudio.c` hammers the
+  API like a hostile audio callback (random fill sizes, seeks anywhere, volume changes, canary bytes after every buffer) and
+  compares every fill with a reference decode; `tools/testaudio.py` plays synthetic tones, sweeps, square waves, noise, DC,
+  silence, two-tone stereo and 6 channels through WAV and 16/24-bit FLAC and judges the output alone: exact samples, identical
+  bytes whatever the request sizes, exact length, no step larger than the signal allows, sine SINAD and spurious tones,
+  channel integrity, exact volume, files cut short, seeks at every frame edge, and damaged frames (silence, never noise)
+  They also run against library 0.4.0 and later (build `testaudio.c` with `-DPEEP_WIDE`; the Python suite detects it).
 * `tools/fuzz.c`: a mutation fuzzer that puts the input and the workspace against unmapped
   guard pages and has a hang watchdog
 

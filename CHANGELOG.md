@@ -2,6 +2,15 @@
 
 All notable changes to Liberated Peep.
 
+## Unreleased
+
+### Added (tests only, no library change)
+- `make test-audio`: a stutter / click / garble suite (`tools/testaudio.c`, `tools/testaudio.py`; the tool gains `-R seed`,
+  a random request size on every call). About 640,000 soak checks and 857 signal checks, in under 4 seconds. 10 deliberate
+  breakages of the decoder (swapped channels, repeated samples, a wrong output stride, an off-by-one seek, wrong volume,
+  a position that does not advance, and others) are all caught. It found two gaps in its own first version (no truncated-file
+  case, no stereo volume case), now closed.
+
 ## 0.1.2
 
 **Built from Peep 0.2.11.** FLAC frames are now integrity-checked.

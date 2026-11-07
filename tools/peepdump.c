@@ -1,4 +1,5 @@
-/* peepdump [-C native|dr] [-g gain] [-c chunk] [-s seekframe] file > out.raw   (stereo s16le) */
+/* peepdump [-C native|dr] [-g gain] [-c chunk] [-s seekframe] [-R seed] file > out.raw   (stereo s16le)
+ *   -R: ask for a different, random number of frames (1..chunk) on every call, like a real audio callback */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,10 +29,11 @@ char *optarg; int optind;
 #endif
 int main(int argc, char **argv)
 {
-    unsigned gain = 256; size_t chunk = 1024; long long seek = -1; int o; int dr = 0;
-    while ((o = getopt(argc, argv, "g:c:s:C:")) != -1)
+    unsigned gain = 256; size_t chunk = 1024; long long seek = -1; int o; int dr = 0; unsigned long long rnd = 0;
+    while ((o = getopt(argc, argv, "g:c:s:C:R:")) != -1)
         if (o == 'g') gain = atoi(optarg); else if (o == 'c') chunk = atol(optarg);
-        else if (o == 's') seek = atoll(optarg); else dr = !strcmp(optarg, "dr");
+        else if (o == 's') seek = atoll(optarg); else if (o == 'R') rnd = strtoull(optarg, 0, 10) * 2654435761ull + 1;
+        else dr = !strcmp(optarg, "dr");
     if (optind >= argc) return 2;
 #ifdef _WIN32
     _setmode(_fileno(stdout), _O_BINARY);
@@ -59,7 +61,8 @@ int main(int argc, char **argv)
     peep_set_gain(&p, gain);
     if (seek >= 0) peep_seek(&p, seek);
     int16_t *buf = malloc(chunk * 4 + 64); size_t n;
-    while ((n = peep_fill(&p, buf, chunk)) > 0) fwrite(buf, 4, n, stdout);
+#define NEXT() (rnd ? (rnd ^= rnd << 13, rnd ^= rnd >> 7, rnd ^= rnd << 17, (rnd & 3) == 0 ? 1 : 1 + rnd % chunk) : chunk)
+    while ((n = peep_fill(&p, buf, NEXT())) > 0) fwrite(buf, 4, n, stdout);
     peep_close(&p); free(buf); free(work);
 #ifndef _WIN32
     munmap(d, st.st_size);
