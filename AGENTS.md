@@ -6,7 +6,7 @@ hands back stereo 16-bit samples, on demand. It plays nothing by itself; your pr
 the samples to a sound device.
 
 **Branches.** `main` is the assembly and documentation only, at the old x86-64 version 0.1.2. **`dev` (this branch) has the library
-at 0.5.0, identical to `arm64` except for one experiment in `flac.asm` (fused fixed-predictor decoding, x86-64 only; see the CHANGELOG), plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
+at 0.5.0, identical to `arm64` except for two speed experiments in `flac.asm` and `arm64/flac.s` (fused fixed-predictor decoding and a vector LPC loop: SSE4.1 chosen by `cpuid` on x86-64, NEON on ARM64) and the new compressed-WAV codec (`wavc.asm`, `arm64/wavc.s`); see the CHANGELOG, plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
 `third_party/`, `tools/`), the audio-quality tests, and the AppImage tooling. `arm64` has all of that and also the 22 language packages
 (`Downloads/`) and their bindings (`bindings/`), which are not on this branch. The earlier x86-64-only AGENTS.md is kept at the
 end of this file, marked as historical: where it disagrees with the text above, the text above is right.
@@ -16,7 +16,7 @@ end of this file, marked as historical: where it disagrees with the text above, 
 | Use it when | Do not use it when |
 |---|---|
 | the target is x86-64 (Linux, BSD, Windows) or ARM64 Linux (Raspberry Pi, ARM servers) | the target is 32-bit ARM, RISC-V or any other CPU: there is no port |
-| you need WAV (8 to 32-bit, float) or FLAC and want no dependencies | you need MP3, Ogg Vorbis, AAC or Opus (not included; see "Other formats") |
+| you need WAV (8 to 32-bit, float, A-law, mu-law, IMA and MS ADPCM) or FLAC and want no dependencies | you need MP3, Ogg Vorbis, AAC or Opus (not included; see "Other formats") |
 | the audio thread must not allocate, lock or call the OS | you need 32-bit FLAC (up to 31 bits works) |
 | you want a very small binary, or are embedding in an unusual runtime | you need resampling, mixing, EQ or effects (this is a decoder only) |
 
@@ -67,8 +67,8 @@ the `.asm` or `.s` files includes it (three comments mention its name, nothing m
 
 | CPU | Required | Optional |
 |---|---|---|
-| x86-64 | `peep.asm`, `abi.inc` | `flac.asm` (FLAC), `wav.asm` (8/12/20/24/32-bit and float WAV) |
-| ARM64 | `arm64/peep.s`, `arm64/abi_a64.inc` | `arm64/flac.s` (FLAC), `arm64/wav.s` (8/12/20/24/32-bit and float WAV) |
+| x86-64 | `peep.asm`, `abi.inc` | `flac.asm` (FLAC), `wav.asm` (8/12/20/24/32-bit and float WAV), `wavc.asm` (A-law, mu-law, IMA and MS ADPCM WAV) |
+| ARM64 | `arm64/peep.s`, `arm64/abi_a64.inc` | `arm64/flac.s` (FLAC), `arm64/wav.s` (8/12/20/24/32-bit and float WAV), `arm64/wavc.s` (A-law, mu-law, IMA and MS ADPCM WAV) |
 
 Remove (C, Python or packaging; the library uses none of it):
 
@@ -155,14 +155,14 @@ A codec table (`peep_codec`) is five 8-byte pointers: offset 0 `open`, 8 `read`,
 | `peep_seek` | `p`, `frame` | none |
 | `peep_close` | `p` | none |
 | `peep_flac_metadata` | `p`, `type`, `index`, `&data` | block length, or -1 |
-| `peep_flac`, `peep_wavx` | none | address of that codec's table |
+| `peep_flac`, `peep_wavx`, `peep_wavc` | none | address of that codec's table |
 
 * **`peep_open`** tries the built-in 16-bit PCM WAV (plain and extensible) first, then each codec in `codecs` in order. `codecs` is a NULL-terminated array of 8-byte table
   addresses, or 0 for the built-in WAV alone. Get a table's address from `peep_flac()` / `peep_wavx()` (works in a static link and in a shared library); the data symbols
   `peep_codec_flac` / `peep_codec_wavx` are the same tables. It returns 0 for anything it cannot play, including a sample rate outside 1,000 to 1,048,575 Hz or more than 8 channels.
   **Workspace protocol:** pass `work` = 0, `work_size` = 0 first. If it returns 0 and `[p + 144]` (`work_need`) is nonzero, a codec wants that many bytes: call `peep_open` again with
   `work` = a buffer of at least that size and `work_size` = its size. If it returns 0 and `work_need` is 0, the data is not supported. FLAC needs `channels * max_blocksize * 4 + 16`
-  bytes: typically 36 KB, at most 2,097,136 (8 channels, 65,535-sample blocks), so a static 2 MB buffer always suffices. WAV and wav.asm need none. The second call clears `p` again, so
+  bytes: typically 36 KB, at most 2,097,136 (8 channels, 65,535-sample blocks), so a static 2 MB buffer always suffices. WAV, wav.asm and wavc.asm's A-law / mu-law need none; wavc.asm's IMA and MS ADPCM need 80 bytes (`work_need` = 80). The second call clears `p` again, so
   load every argument before each call.
 * **`peep_fill`** writes up to `frames` stereo frames, 4 bytes each, little-endian `int16` left then right, to `out` (room for `frames * 4` bytes), and returns how many. Mono is written to
   both sides; with 3 or more channels only the first two are used. It may return **fewer** than asked before the end; **0 means the end** (and every later call returns 0 until you seek).
@@ -894,6 +894,8 @@ typedef struct peep_codec {
   constants at the top of `peep.asm`, the `P_*` / `S_*` constants (`P_ERRS` 152, `P_DITH` 156, `P_BITS` 158 are new) at the top of `flac.asm`, the
   `P_*` constants in `arm64/abi_a64.inc`, and the `S_*` constants at the top of `arm64/flac.s`.
   Change one, change all, then run the tests.
+* `make test-wavc` (part of `make test`, and `testwavc.py --quick` in `make test-arm64`) tests the compressed-WAV codec against models checked with ffmpeg and libsndfile; keep both ports passing. IMA ADPCM follows the reference
+  algorithm (libsndfile), not ffmpeg's rounding: see the README. A parser change must keep the fuzzer clean on the `c?.wav` seeds (it found an unchecked read of a `fact` chunk past the end of the file).
 * `make test-simd` (part of `make test`) proves the SIMD/fallback dispatch: bit-exact decoding in a forced-scalar build and on an emulated CPU with no SSE4.1 (needs `qemu-x86_64`). Any change to the `cpuid` check must keep it passing.
 * **This is the `dev` branch:** the library here is identical to the `arm64` branch except `flac.asm` and `arm64/flac.s`, which carry two speed experiments (fused fixed-predictor decoding, and a vector LPC loop: SSE4.1 chosen by `cpuid` on x86-64, NEON on ARM64) (check with `git diff origin/arm64 -- peep.asm flac.asm wav.asm abi.inc peep.h arm64`; only `flac.asm` and `arm64/flac.s` should differ). `arm64` is the unchanged baseline to compare speed against. Both ports carry both changes (NEON is always present on AArch64, so the ARM64 version needs no detection and has no scalar fallback loop). The ARM64 speed effect has not been measured (QEMU timings mean nothing). `main` stays assembly and documentation only, at the old 0.1.2 library. A library change made here must also go to `arm64`, and keep the tests on `dev`/`arm64`, never on `main`.
 * Beyond `make test` and `make test-arm64`, run `make test-audio` (stutter, click and garble tests; part of `make test`). `make clean` deletes `build/`, which also holds the tracked `build/libpeep-test-x86_64.AppImage`: restore it with `git checkout -- build/libpeep-test-x86_64.AppImage` afterwards.
@@ -923,8 +925,9 @@ typedef struct peep_codec {
 * A damaged FLAC frame (its CRC-16 fails) is output as silence of the same length and decoding carries on;
   `p->errors` counts them, so the caller can be told afterwards.
 * 32-bit FLAC, MP3 and Vorbis are not handled natively.
-* The built-in WAV is 16-bit PCM only. `peep_codec_wavx` (wav.asm / arm64/wav.s) adds unsigned 8-bit, 12/20/24/32-bit PCM and
-  32/64-bit float; A-law, mu-law and ADPCM WAV are not handled.
+* The built-in WAV is 16-bit PCM only. `peep_codec_wavx` (wav.asm / arm64/wav.s) adds unsigned 8-bit, 12/20/24/32-bit PCM and 32/64-bit float;
+  `peep_codec_wavc` (wavc.asm / arm64/wavc.s) adds A-law, mu-law, IMA ADPCM and Microsoft ADPCM (ADPCM mono or stereo only). GSM 6.10, MP3-in-WAV and other compressed WAV types are not handled. IMA ADPCM made by ffmpeg
+  decodes a few units away from ffmpeg's own output because ffmpeg rounds differently from the reference algorithm. The ARM64 versions have only been run under QEMU.
 
 ## Archive: the earlier AGENTS.md (0.1.2, x86-64 only), historical
 

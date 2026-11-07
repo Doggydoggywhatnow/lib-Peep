@@ -4,8 +4,8 @@ CC   ?= gcc
 MINGW ?= x86_64-w64-mingw32-gcc
 B := build
 FLACDIR ?= third_party
-OBJS := $(B)/peep.o $(B)/flac.o $(B)/wav.o
-WOBJS := $(B)/peep.obj $(B)/flac.obj $(B)/wav.obj
+OBJS := $(B)/peep.o $(B)/flac.o $(B)/wav.o $(B)/wavc.o
+WOBJS := $(B)/peep.obj $(B)/flac.obj $(B)/wav.obj $(B)/wavc.obj
 
 # On an ARM64 machine a plain `make` builds the ARM64 library (arm64/*.s, GNU as).
 # On x86-64 it builds the x86-64 one (*.asm, nasm). Cross-build ARM64 from x86-64 with
@@ -39,8 +39,8 @@ clean:; rm -rf $(B)
 # `make test`: ground-truth FLAC corpus (random streams from tools/mkflac.py), the WAV
 # suite, and a short fuzz run. Needs python3 + numpy. `make fuzz` runs a longer one.
 SEEDDIR := $(B)/seeds
-$(SEEDDIR): tools/mkflac.py tools/testwavx.py
-	mkdir -p $@ && for s in 1 10 13 15 17 19; do python3 tools/mkflac.py --gen $@/s$$s --seed $$s >/dev/null; done; python3 tools/testwavx.py --gen $@
+$(SEEDDIR): tools/mkflac.py tools/testwavx.py tools/testwavc.py
+	mkdir -p $@ && for s in 1 10 13 15 17 19; do python3 tools/mkflac.py --gen $@/s$$s --seed $$s >/dev/null; done; python3 tools/testwavx.py --gen $@; python3 tools/testwavc.py --gen $@ || true
 test: $(B)/peepdump $(B)/fuzz $(SEEDDIR)
 	python3 tools/testwav.py $(B)/peepdump
 	python3 tools/mkflac.py --run 120 --seed 1 --tool $(B)/peepdump
@@ -49,13 +49,21 @@ test: $(B)/peepdump $(B)/fuzz $(SEEDDIR)
 	python3 tools/testwavx.py --run 240 --seed 1 --tool $(B)/peepdump
 	$(MAKE) --no-print-directory test-audio
 	$(MAKE) --no-print-directory test-simd
-	$(B)/fuzz 200000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac $(SEEDDIR)/w0.wav $(SEEDDIR)/w1.wav $(SEEDDIR)/w2.wav $(SEEDDIR)/w3.wav $(SEEDDIR)/w4.wav
+	$(MAKE) --no-print-directory test-wavc
+	$(B)/fuzz 200000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac $(SEEDDIR)/w0.wav $(SEEDDIR)/w1.wav $(SEEDDIR)/w2.wav $(SEEDDIR)/w3.wav $(SEEDDIR)/w4.wav $$(ls $(SEEDDIR)/c?.wav 2>/dev/null)
+# `make test-wavc`: the compressed-WAV codec (A-law, mu-law, IMA and Microsoft ADPCM) against independent models that are themselves checked against
+# ffmpeg and libsndfile. Needs ffmpeg (skipped with a notice if missing); libsndfile is used when it can be loaded.
+$(B)/testwavc_ws: tools/testwavc_ws.c $(B)/libpeep.a
+	$(CC) -O2 -I. -o $@ tools/testwavc_ws.c $(B)/libpeep.a
+test-wavc: $(B)/peepdump $(B)/testwavc_ws $(SEEDDIR)
+	python3 tools/testwavc.py --tool $(B)/peepdump
+	$(B)/testwavc_ws $(SEEDDIR)/c?.wav
 # SIMD LPC (flac.asm): the SSE4.1 loop is used only when cpuid says the CPU has it. `make test-simd` proves the other half: the same sources must
 # decode bit-exactly (1) in a build forced to the scalar loop (-dNOSIMD) and (2) on an emulated CPU WITHOUT SSE4.1, where running the SIMD
 # instruction would crash, so a wrong cpuid check (inverted, wrong bit, ignored) fails here. Needs qemu-x86_64 for (2); skipped with a notice if absent.
 QEMUX ?= qemu-x86_64
 $(B)/flac_nosimd.o: flac.asm abi.inc | $(B);   $(NASM) -dNOSIMD -f elf64 $< -o $@
-$(B)/libpeep_nosimd.a: $(B)/peep.o $(B)/flac_nosimd.o $(B)/wav.o;   rm -f $@; ar rcs $@ $^
+$(B)/libpeep_nosimd.a: $(B)/peep.o $(B)/flac_nosimd.o $(B)/wav.o $(B)/wavc.o;   rm -f $@; ar rcs $@ $^
 $(B)/peepdump_nosimd: tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nosimd.a
 	$(CC) -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nosimd.a -lm
 $(B)/peepdump_static: tools/peepdump.c $(B)/drflac.o $(B)/libpeep.a
@@ -78,8 +86,8 @@ test-audio: $(B)/peepdump $(B)/testaudio $(SEEDDIR) $(AUDIODIR)
 	$(B)/testaudio 4000 $(SEEDDIR)/s*.flac $(AUDIODIR)/*
 	python3 tools/testaudio.py --tool $(B)/peepdump
 fuzz: $(B)/fuzz $(SEEDDIR)
-	for k in 1 2 3 4; do FUZZSEED=$$k $(B)/fuzz 2000000 $(SEEDDIR)/s*.flac $(SEEDDIR)/w*.wav & done; wait
-.PHONY: test test-audio test-simd fuzz
+	for k in 1 2 3 4; do FUZZSEED=$$k $(B)/fuzz 2000000 $(SEEDDIR)/s*.flac $(SEEDDIR)/w*.wav $(SEEDDIR)/c*.wav & done; wait
+.PHONY: test test-audio test-simd test-wavc fuzz
 
 # ---- ARM64 (AArch64) ----------------------------------------------------------
 # Pure assembly, GNU as syntax. CROSS is the toolchain prefix when cross-building;
@@ -88,7 +96,7 @@ CROSS ?=
 A64AS ?= $(CROSS)as
 A64AR ?= $(CROSS)ar
 A64CC ?= $(CROSS)gcc
-A64OBJS := $(B)/peep_a64.o $(B)/flac_a64.o $(B)/wav_a64.o
+A64OBJS := $(B)/peep_a64.o $(B)/flac_a64.o $(B)/wav_a64.o $(B)/wavc_a64.o
 ifneq (,$(filter aarch64 arm64,$(shell uname -m)))
 QEMU ?=
 else
@@ -114,7 +122,10 @@ test-arm64: $(B)/run_a64.sh $(B)/fuzz_a64 $(SEEDDIR)
 	python3 tools/testcrc.py --run 150 --seed 1 --tool $(B)/run_a64.sh
 	python3 tools/testhires.py --run 60 --seed 1 --tool $(B)/run_a64.sh
 	python3 tools/testwavx.py --run 120 --seed 1 --tool $(B)/run_a64.sh
-	$(QEMU) $(B)/fuzz_a64 100000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac $(SEEDDIR)/w0.wav $(SEEDDIR)/w1.wav $(SEEDDIR)/w2.wav $(SEEDDIR)/w3.wav $(SEEDDIR)/w4.wav
+	python3 tools/testwavc.py --quick --tool $(B)/run_a64.sh
+	$(A64CC) -static -O2 -I. -o $(B)/testwavc_ws_a64 tools/testwavc_ws.c $(B)/libpeep_a64.a
+	$(QEMU) $(B)/testwavc_ws_a64 $(SEEDDIR)/c?.wav
+	$(QEMU) $(B)/fuzz_a64 100000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac $(SEEDDIR)/w0.wav $(SEEDDIR)/w1.wav $(SEEDDIR)/w2.wav $(SEEDDIR)/w3.wav $(SEEDDIR)/w4.wav $$(ls $(SEEDDIR)/c?.wav 2>/dev/null)
 .PHONY: arm64 test-arm64
 
 # `make appimage`: Linux AppImage test environment (WAV + native FLAC, no other codecs).

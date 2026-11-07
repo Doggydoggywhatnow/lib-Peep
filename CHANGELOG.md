@@ -44,6 +44,26 @@ All notable changes to Liberated Peep.
 - Not done: ARM64 (NEON always present, so no detection needed); LPC fused with residual decoding; faster order-8 prediction, which is where the default-level files
   (24-bit, 96 kHz, level 5) still spend their time. Measured on a shared VM, not an idle machine.
 
+### Added (dev branch): compressed WAV codec, `peep_codec_wavc`
+- `wavc.asm` and `arm64/wavc.s` (about 2.5 KB each), pure assembly: **A-law** (tag 6) and **mu-law** (tag 7), 1 to 8 channels, plain or extensible headers;
+  **IMA ADPCM** (0x11) and **Microsoft ADPCM** (2), mono or stereo. Output is 16-bit (`p->bits` = 16, `read32` is each sample << 16). ADPCM needs an 80-byte workspace
+  (`work_need` protocol); A-law and mu-law need none. Seeking decodes from the start of the block that holds the frame. A `fact` chunk trims the padding of the last block and a
+  partial last block plays the groups it holds. Microsoft ADPCM uses the coefficient table in the file (division by 256 truncates toward zero; the header delta is used as it stands).
+  `peep_wavc()` returns the table's address; `peep.h` declares both.
+- **IMA ADPCM follows the reference algorithm**, not ffmpeg's rounding. Checked against a second independent decoder: `libsndfile` (through `ctypes`) matches the reference-form model
+  bit for bit, and `ffmpeg` differs from both (its `((2*delta+1)*step)>>3` shortcut): up to about 45 units on a test file. A-law, mu-law and Microsoft ADPCM agree across ffmpeg,
+  libsndfile and the model bit for bit.
+- Not covered (rejected, never decoded wrongly): GSM 6.10, MP3 inside WAV, Dialogic OKI and Yamaha ADPCM, G.72x, extensible-header ADPCM, ADPCM above 2 channels.
+- Tests, all saved: `tools/wavmodels.py` (independent models), `tools/sndfileref.py` (libsndfile reference), `tools/testwavc.py` (`make test-wavc`; 1,085 checks on x86-64, 643 in
+  the ARM64 `--quick` run under QEMU) and `tools/testwavc_ws.c` (the workspace protocol, 23 checks on each CPU). The fuzzer also mutates five compressed-WAV seeds: 2.1 million inputs on
+  x86-64 and 150,000 on ARM64 run clean.
+- Found and fixed along the way: (1) the fuzzer found an unchecked read of a `fact` chunk whose body lies past the end of the file (a crash on a damaged file), in both ports;
+  (2) the breakage check showed the decoder floored the Microsoft ADPCM header delta at 16 while `libsndfile` and `ffmpeg` use it as it stands, so a header delta below 16 or negative
+  decoded differently from both (valid encoders never write one, so ordinary files were unaffected); (3) a first stereo MS ADPCM bug (a scratch register clobbered) caught immediately by the tests.
+- Breakage check: 23 deliberate breakages on x86-64 and 22 on ARM64 (formulas, tables, offsets, header rules, fact trimming, partial blocks, seeking, workspace and channel limits).
+  All were caught once the new tests above were added, except one on x86-64 that only slows seeking (a resync that decodes from the block start every call but gives the same samples).
+- Not done: the language packages and bindings do not know the new codec (dev has none); ARM64 has only been run under QEMU, never on real hardware; speed was not measured or tuned.
+
 ### Experiment (dev branch): both speed changes ported to ARM64 (`arm64/flac.s`)
 - Fused fixed-predictor decoding: the same design as x86-64 (orders 1 to 4 applied inside `decode_residual` with the previous sample in `x15`, older history read back
   from the plane, escape partitions run the fixed loop over their region only). LPC prediction: the scalar loop is replaced by NEON, four taps per pass as `smlal` and

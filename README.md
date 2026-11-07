@@ -10,7 +10,7 @@ an audio file into samples, small enough to drop into any program that can call 
 Version **0.5.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
 
 **Branches.** `main` is the assembly and documentation only, at the old x86-64 version 0.1.2. **`dev` (this branch) has the library
-at 0.5.0, identical to `arm64` except for two speed experiments in `flac.asm` and `arm64/flac.s` (fused fixed-predictor decoding and a vector LPC loop: SSE4.1 chosen by `cpuid` on x86-64, NEON on ARM64; see the CHANGELOG), plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
+at 0.5.0, identical to `arm64` except for two speed experiments in `flac.asm` and `arm64/flac.s` (fused fixed-predictor decoding and a vector LPC loop: SSE4.1 chosen by `cpuid` on x86-64, NEON on ARM64) and the new compressed-WAV codec (`wavc.asm`, `arm64/wavc.s`); see the CHANGELOG, plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
 `third_party/`, `tools/`), the audio-quality tests, and the AppImage tooling. `arm64` has all of that and also the 22 language packages
 (`Downloads/`) and their bindings (`bindings/`), which are not on this branch. The earlier x86-64-only documentation is kept at the
 end of each of these files.
@@ -93,6 +93,8 @@ the build system: assemble `peep.asm` and `flac.asm` yourself
 | `arm64/peep.s` | 2.5 KB | the same core in AArch64 assembly |
 | `arm64/flac.s` | 9.7 KB | the same FLAC decoder in AArch64 assembly (NEON for stereo and output), same features |
 | `arm64/wav.s` | 1.3 KB | the same WAV extension codec in AArch64 assembly |
+| `wavc.asm` | 2.5 KB | compressed WAV codec: A-law, mu-law, IMA ADPCM, Microsoft ADPCM (16-bit output) |
+| `arm64/wavc.s` | 2.5 KB | the same compressed WAV codec in AArch64 assembly |
 | `arm64/abi_a64.inc` | | AArch64 glue: calling convention, symbol naming |
 | `peep.h` | | the whole public API |
 | `examples/codec_drflac.c` | | a 20-line codec adapter (wraps `dr_flac`): the model for adding any other format |
@@ -118,8 +120,28 @@ and these work too: **unsigned 8-bit; signed 12, 16, 20, 24 and 32-bit PCM; 32-b
 `WAVE_FORMAT_EXTENSIBLE` form, 1 to 8 channels, odd chunks, unknown-length and truncated files. `p->bits` reports the
 valid bit depth (float: 32). `peep_fill32` gives every bit left-justified; `peep_fill` gives 16 bits, with the same volume,
 rounding and dither choices as for FLAC. Float is scaled by 2^31, rounded to nearest even and clipped; NaN is silence.
-No workspace is needed. Not handled: 8-bit A-law/mu-law, ADPCM, and 16-bit files that the built-in decoder already takes
+No workspace is needed. Not handled here (see the next section for A-law, mu-law and ADPCM): 16-bit files that the built-in decoder already takes
 (an extensible 16-bit file with fewer valid bits reports 16).
+
+## Compressed WAV: A-law, mu-law and ADPCM
+
+Add `&peep_codec_wavc` to the codecs list (`wavc.asm`, `arm64/wavc.s`, about 2.5 KB each) and these WAV files play:
+
+| Format (WAV tag) | Channels | Notes |
+|---|---|---|
+| A-law (6) and mu-law (7) | 1 to 8 | 8-bit logarithmic; plain or `WAVE_FORMAT_EXTENSIBLE` headers |
+| IMA ADPCM (0x11) | 1 or 2 | 4-bit, block based |
+| Microsoft ADPCM (2) | 1 or 2 | 4-bit, block based, uses the coefficient table in the file |
+
+* **Output is 16-bit** (`p->bits` = 16); `peep_fill32` gives each sample shifted left by 16. Volume works as for any 16-bit source.
+* **ADPCM needs an 80-byte workspace** (the usual `work_need` protocol: open once without one, then again with the buffer it asks for). A-law and mu-law need none.
+* **Seeking** decodes from the start of the block that holds the frame, so a seek costs at most one block of work.
+* **A `fact` chunk, when present, trims the padding of the last ADPCM block.** A partial last block plays the groups it holds.
+* **IMA ADPCM follows the reference algorithm**, the one `libsndfile` and Windows use. `ffmpeg` rounds differently (`((2*delta+1)*step)>>3`), so an IMA file *made by
+  ffmpeg* decodes here to values that differ from ffmpeg's own decoding by a few units (up to about 45 on a 30,000-sample test file; the block headers resynchronise it).
+  A-law, mu-law and Microsoft ADPCM agree with `ffmpeg` and `libsndfile` bit for bit.
+* **Not covered:** GSM 6.10, MP3 inside WAV, Dialogic OKI / Yamaha ADPCM, G.72x, ADPCM in `WAVE_FORMAT_EXTENSIBLE` form, and ADPCM with more than 2 channels. These are rejected
+  (`peep_open` returns 0 and `work_need` stays 0), never decoded wrongly.
 
 ## Adding a codec
 
@@ -178,7 +200,7 @@ with volume applied. Code size: 9.3 KB for FLAC (9.7 KB on ARM64) against about 
   `p->errors` counts how many frames were damaged.
 * Seeking is a binary search over frame headers; a byte pattern that looks like a valid
   header could, very rarely, mislead it.
-* The built-in WAV handles 16-bit PCM only; add `peep_codec_wavx` for 8, 12, 20, 24, 32-bit and float. A-law, mu-law and ADPCM WAV are not supported.
+* The built-in WAV handles 16-bit PCM only; add `peep_codec_wavx` for 8, 12, 20, 24, 32-bit and float. A-law, mu-law, IMA ADPCM and Microsoft ADPCM WAV need `peep_codec_wavc`; GSM 6.10, MP3-in-WAV and the other compressed WAV types are not supported.
 * MP3 and Ogg Vorbis are not included yet (Peep itself plays them through C decoders).
 * One `peep` belongs to one thread at a time. Separate `peep`s are independent.
 * The Windows build is tested under Wine, not on real Windows.
@@ -202,6 +224,10 @@ with volume applied. Code size: 9.3 KB for FLAC (9.7 KB on ARM64) against about 
   bytes whatever the request sizes, exact length, no step larger than the signal allows, sine SINAD and spurious tones,
   channel integrity, exact volume, files cut short, seeks at every frame edge, and damaged frames (silence, never noise)
   They also run against older libraries (0.3.x and earlier): `testaudio.c` built without `-DPEEP_WIDE` and the Python suite detects which behaviour to expect. On this branch the Makefile builds it with `-DPEEP_WIDE`.
+* `tools/testwavc.py` (`make test-wavc`): the compressed-WAV codec against independent models that are themselves checked against real decoders (`ffmpeg` and
+  `libsndfile`, through `tools/wavmodels.py` and `tools/sndfileref.py`); every format, mono and stereo, many block sizes, signals that push the ADPCM step to its limits,
+  `fact` chunks, partial and truncated blocks, extensible headers, custom Microsoft coefficient tables, damaged headers and streams, seeks at every block edge,
+  random request sizes, volume, 32-bit output and rejected files. `tools/testwavc_ws.c` checks the workspace protocol. Needs `ffmpeg` (skipped with a notice if missing).
 * `tools/testwavx.py`: the WAV extension codec against an independent model (every format, extensible headers, volume,
   the three 16-bit modes, `peep_fill32`, seeking, truncation, rejects)
 * `tools/fuzz.c`: a mutation fuzzer that puts the input and the workspace against unmapped
