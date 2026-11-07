@@ -66,6 +66,12 @@ All notable changes to Liberated Peep.
   slower, and wrong). None closes the gap and the cause of the loop's low instruction rate is still unknown; finding it needs hardware performance counters, which this VM does not provide.
 
 
+### Experiment (dev branch): the bit reader's cache update goes first in the Rice loop, x86-64 only
+- `flac.asm`: in the fast path of the residual loop the `shl r13, cl` that drops the consumed bits now comes before the value arithmetic (a shift by `cl` depends on the flags it is given, so it
+  now takes them from the short `cmp` just above, not from the value arithmetic). The instruction set is unchanged, only the order, so output is identical. ARM64 not changed or measured.
+- Measured against the build before it (same machine, alternating runs, min of 7): 24-bit +3.7%, level 2 +7.4%, level 0 +5.1%, 96 kHz +4.3%, level 8 +0.6%, level 5 unchanged. 24-bit is still about 8% slower than `dr_flac`
+  (12.00 against 11.00 ns per frame). The bit-position reader was tried again after the `bsr` fix: 12 to 17% slower, dropped. `make test` passes in full.
+
 ### Experiment (dev branch): one instruction removes a false dependency in the Rice loop, x86-64 only
 - `flac.asm`: `xor eax, eax` before `bsr rax, r13` in the residual loop. `bsr` leaves its destination unchanged when its source is zero, so the CPU treats the old `rax` as an input; `rax` held the
   previous sample's zig-zag or prediction result, which chained each sample's bit scan to the last sample's value and stopped the bit reader and the predictor overlapping. The zeroing idiom breaks the chain.

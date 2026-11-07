@@ -533,17 +533,17 @@ ff_scan:
     lea  edx, [rax + r10 + 1]         ; t = q + 1 + k bits for this sample
     cmp  edx, r14d
     ja   %%more                       ; not all in the cache: slow path
-    mov  r8, r13                      ; value, computed from the old cache:
-    mov  ecx, 64                      ;   V = top t bits = (1 << k) | low
+    mov  r8, r13                      ; the old cache, kept for the value
+    mov  ecx, edx                     ; the loop-carried work of the bit reader first: drop t bits. Its flags then come from the short
+    shl  r13, cl                      ; cmp above, not from the value arithmetic below (a shift by cl depends on the flags it is given)
+    sub  r14d, edx
+    mov  ecx, 64                      ; value, computed from the old cache:  V = top t bits = (1 << k) | low
     sub  ecx, edx
     shr  r8, cl
     lea  r11, [rax - 1]               ;   u = V + ((q - 1) << k)
     mov  ecx, r10d
     shl  r11, cl
     add  r8, r11
-    mov  ecx, edx                     ; the only loop-carried work of the bit reader: drop t bits
-    shl  r13, cl
-    sub  r14d, edx
 %%zz:
     mov  rax, r8
     shr  rax, 1
