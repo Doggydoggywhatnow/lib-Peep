@@ -43,7 +43,8 @@ S_BLKPOS equ 92                   ; u32 next sample to hand out
 S_MAXBLK equ 96                   ; u32 STREAMINFO max block size = plane stride
 S_BLK0   equ 100                  ; u32 STREAMINFO min block size (fixed-size streams)
 S_BPS    equ 104                  ; u32 bits per sample of the decoded block
-S_SIBPS  equ 108                  ; u32 STREAMINFO bits per sample
+S_SIBPS  equ 108                  ; u32 STREAMINFO bits per sample (low byte); bit 8 = SIMDF
+SIMDF    equ 0x100                ; set at open when cpuid reports SSE4.1: predict then uses the SIMD multiply loop
 S_SPOS   equ 112                  ; u64 first sample number of the decoded block
 S_PLANE0 equ 120                  ; u64 address of plane 0 (work + 16)
 
@@ -324,7 +325,7 @@ parse_header:
     call br_get
     test eax, eax
     jnz  .bad
-    mov  eax, [rbx + S_SIBPS]
+    movzx eax, byte [rbx + S_SIBPS]   ; (bit 8 of the field is the SIMD flag)
     test r11d, r11d
     jz   .bpsok
     mov  eax, 8
@@ -734,6 +735,52 @@ predict:
     sub  r11, rdx                     ; window start x[order - P] (up to 3 slots of front slack)
     movsxd r10, dword [rsi - 4]       ; x[i-1] lives in a register: no store->load round trip
     lea  r8d, [rax - 4]               ; the last 4 window slots are handled outside the loop
+%ifndef NOSIMD
+    test dword [rbx + S_SIBPS], SIMDF
+    jz   .sample
+    test r8d, r8d
+    jz   .sample                      ; order <= 4: nothing for the vector loop to do
+.samplev:                             ; SSE4.1: 4 taps per pass as two 2-lane signed 32x32 -> 64 multiplies
+    pxor xmm0, xmm0
+    xor  ecx, ecx
+.macv:
+    movdqu xmm1, [r11 + rcx * 4]      ; x[j .. j+3]: all at least 4 samples old, so long since stored (no store-forwarding stall)
+    movdqa xmm2, xmm1
+    punpckldq xmm1, xmm1              ; x[j], x[j], x[j+1], x[j+1]: dwords 0 and 2 are the two multiplicands
+    punpckhdq xmm2, xmm2              ; x[j+2] and x[j+3] likewise
+    pmuldq xmm1, [rdi + rcx * 8]      ; coefficients are 64-bit slots holding int32: dword 0 of each. L_COEF is 16-byte aligned
+    pmuldq xmm2, [rdi + rcx * 8 + 16]
+    paddq xmm0, xmm1
+    paddq xmm0, xmm2
+    add  ecx, 4
+    cmp  ecx, r8d
+    jb   .macv
+    movhlps xmm1, xmm0
+    paddq xmm0, xmm1
+    movq rax, xmm0                    ; the sum of the older taps, exact in 64 bits like the scalar loop
+    movsxd rdx, dword [r11 + rcx * 4] ; the newest 4 taps as in the scalar loop: three from memory, the newest from r10
+    imul rdx, [rdi + rcx * 8]
+    add  rax, rdx
+    movsxd rdx, dword [r11 + rcx * 4 + 4]
+    imul rdx, [rdi + rcx * 8 + 8]
+    add  rax, rdx
+    movsxd rdx, dword [r11 + rcx * 4 + 8]
+    imul rdx, [rdi + rcx * 8 + 16]
+    add  rax, rdx
+    mov  rdx, r10
+    imul rdx, [rdi + rcx * 8 + 24]
+    add  rax, rdx
+    mov  ecx, LOC(L_SHIFT)
+    sar  rax, cl
+    add  eax, [rsi]
+    mov  [rsi], eax
+    movsxd r10, eax
+    add  rsi, 4
+    add  r11, 4
+    dec  r9d
+    jnz  .samplev
+    ret
+%endif
 .sample:
     xor  eax, eax
     xor  ecx, ecx
@@ -1332,6 +1379,16 @@ FUNCL flac_open, FLOC
     mov  rax, [rbx + P_WORK]
     add  rax, 16
     mov  [rbx + S_PLANE0], rax
+%ifndef NOSIMD
+    push rbx                          ; cpuid leaf 1, ECX bit 19 = SSE4.1 (pmuldq). If the CPU lacks it the flag stays clear
+    mov  eax, 1                       ; and predict keeps using the scalar loop. Build with -dNOSIMD to force that.
+    cpuid
+    pop  rbx
+    bt   ecx, 19
+    jnc  .nosimd
+    or   dword [rbx + S_SIBPS], SIMDF
+.nosimd:
+%endif
     mov  eax, 1
     RET_
 .fail:

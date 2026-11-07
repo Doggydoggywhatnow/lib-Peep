@@ -28,6 +28,22 @@ All notable changes to Liberated Peep.
   The remaining gaps to `dr_flac` (96 kHz about -21%, 24-bit about -28%, levels 5 and 8 about -4% to -10%) are LPC and wide-residual cases and
   need their own look. Measured on a shared x86-64 cloud VM, not on an idle machine.
 
+### Experiment (dev branch): SSE4.1 LPC prediction chosen by cpuid, x86-64 only
+- `flac.asm`: the LPC prediction loop has a second version that multiplies four taps per pass with SSE4.1 `pmuldq` (two 2-lane signed 32x32 to 64-bit
+  multiplies, summed in 64 bits, so the result is exact exactly like the scalar loop). `peep_open` asks `cpuid` once (leaf 1, ECX bit 19) and records the answer in
+  bit 8 of the FLAC bit-depth field of the `peep` (no global state, no struct change); `peep_fill` uses the vector loop only when that bit is set and the order is
+  above 4. A CPU without SSE4.1 keeps the scalar loop. `nasm -dNOSIMD` builds without the vector loop at all. The newest four taps stay scalar (reading a vector that
+  overlaps just-stored samples would stall store forwarding).
+- Measured against the unchanged `arm64` branch (min of 6, alternating, shared x86-64 VM): level 12 **+26%**, level 8 **+11 to +13%**, mono +3%; level 0 and 2 keep the
+  fixed-predictor gain (+18% and +11%); level 5, 5.1, 96 kHz and 24-bit are flat (within about 2%). The flat ones were encoded at the default level, whose LPC order (about 8) is
+  a single group of taps, where four-at-a-time multiplies cannot beat the scalar loop; requiring two groups changed nothing.
+- Tests: `make test` passes. New `make test-simd` (part of `make test`): bit-exact decoding in a `-dNOSIMD` build and on an emulated CPU without SSE4.1 (`qemu-x86_64 -cpu qemu64`),
+  where executing the vector instruction would crash. Eight breakages of the new code were caught by the normal tests (wrong lane order, wrong coefficient pair, a lane not
+  summed, a stale sum, a wrong step, a bit-depth read without its mask); three more that only matter on an older CPU (flag test inverted, wrong `cpuid` bit, `cpuid` ignored)
+  passed the normal tests, which is why `make test-simd` exists: it now catches all three.
+- Not done: ARM64 (NEON always present, so no detection needed); LPC fused with residual decoding; faster order-8 prediction, which is where the default-level files
+  (24-bit, 96 kHz, level 5) still spend their time. Measured on a shared VM, not an idle machine.
+
 ### Changed (dev branch)
 - The library files on `dev` (`peep.asm`, `flac.asm`, `wav.asm`, `abi.inc`, `peep.h`, `arm64/`) were replaced by the 0.5.0 versions from the `arm64` branch, with the tools and Makefile that depend on them; the documentation was merged, keeping the old text in an archive section at the end of each file. The old x86-64-only changelog (0.1.0 to 0.1.2) is at the end of this file.
 

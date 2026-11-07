@@ -48,7 +48,27 @@ test: $(B)/peepdump $(B)/fuzz $(SEEDDIR)
 	python3 tools/testhires.py --run 120 --seed 1 --tool $(B)/peepdump
 	python3 tools/testwavx.py --run 240 --seed 1 --tool $(B)/peepdump
 	$(MAKE) --no-print-directory test-audio
+	$(MAKE) --no-print-directory test-simd
 	$(B)/fuzz 200000 $(SEEDDIR)/s1.flac $(SEEDDIR)/s10.flac $(SEEDDIR)/s13.flac $(SEEDDIR)/s15.flac $(SEEDDIR)/s17.flac $(SEEDDIR)/s19.flac $(SEEDDIR)/w0.wav $(SEEDDIR)/w1.wav $(SEEDDIR)/w2.wav $(SEEDDIR)/w3.wav $(SEEDDIR)/w4.wav
+# SIMD LPC (flac.asm): the SSE4.1 loop is used only when cpuid says the CPU has it. `make test-simd` proves the other half: the same sources must
+# decode bit-exactly (1) in a build forced to the scalar loop (-dNOSIMD) and (2) on an emulated CPU WITHOUT SSE4.1, where running the SIMD
+# instruction would crash, so a wrong cpuid check (inverted, wrong bit, ignored) fails here. Needs qemu-x86_64 for (2); skipped with a notice if absent.
+QEMUX ?= qemu-x86_64
+$(B)/flac_nosimd.o: flac.asm abi.inc | $(B);   $(NASM) -dNOSIMD -f elf64 $< -o $@
+$(B)/libpeep_nosimd.a: $(B)/peep.o $(B)/flac_nosimd.o $(B)/wav.o;   rm -f $@; ar rcs $@ $^
+$(B)/peepdump_nosimd: tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nosimd.a
+	$(CC) -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nosimd.a -lm
+$(B)/peepdump_static: tools/peepdump.c $(B)/drflac.o $(B)/libpeep.a
+	$(CC) -static -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep.a -lm
+$(B)/run_nosse41.sh: $(B)/peepdump_static
+	printf '#!/bin/sh\nexec $(QEMUX) -cpu qemu64 $(CURDIR)/$(B)/peepdump_static "$$@"\n' > $@; chmod +x $@
+test-simd: $(B)/peepdump $(B)/peepdump_nosimd $(SEEDDIR)
+	python3 tools/mkflac.py --run 60 --seed 7 --tool $(B)/peepdump_nosimd
+	python3 tools/testhires.py --run 12 --seed 3 --tool $(B)/peepdump_nosimd
+	@if command -v $(QEMUX) >/dev/null 2>&1; then $(MAKE) --no-print-directory $(B)/run_nosse41.sh && \
+	  python3 tools/mkflac.py --run 60 --seed 7 --tool $(B)/run_nosse41.sh && python3 tools/testwav.py $(B)/run_nosse41.sh && \
+	  python3 tools/testhires.py --run 12 --seed 3 --tool $(B)/run_nosse41.sh; \
+	else echo "test-simd: $(QEMUX) not found, skipping the emulated CPU without SSE4.1 (only the forced-scalar build was tested)"; fi
 # `make test-audio`: stutter / click / garble tests. A soak that hammers the API with random fills, seeks and volume
 # changes against a reference decode (C), then synthetic signals judged on their output (tones, spectrum, channels, seeks).
 AUDIODIR := $(B)/audio
@@ -59,7 +79,7 @@ test-audio: $(B)/peepdump $(B)/testaudio $(SEEDDIR) $(AUDIODIR)
 	python3 tools/testaudio.py --tool $(B)/peepdump
 fuzz: $(B)/fuzz $(SEEDDIR)
 	for k in 1 2 3 4; do FUZZSEED=$$k $(B)/fuzz 2000000 $(SEEDDIR)/s*.flac $(SEEDDIR)/w*.wav & done; wait
-.PHONY: test test-audio fuzz
+.PHONY: test test-audio test-simd fuzz
 
 # ---- ARM64 (AArch64) ----------------------------------------------------------
 # Pure assembly, GNU as syntax. CROSS is the toolchain prefix when cross-building;
