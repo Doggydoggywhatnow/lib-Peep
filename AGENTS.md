@@ -88,7 +88,7 @@ shape for a library whose whole point is to be dropped into anything:
 * **Real-time safety.** With no allocation, no locks and no system calls, `peep_fill` has
   predictable timing, which is what an audio callback needs.
 * **Size.** The native FLAC decoder is 8.6 KB of code (4 KB of that is the CRC-16 tables); `dr_flac` is
-  about 90 KB. The whole library, WAV and FLAC together, is 9.9 KB.
+  about 90 KB. The whole library, WAV and FLAC together, is 10.0 KB.
 * **Speed costs nothing you can hear.** Native FLAC, with every frame's CRC-16 checked, decodes between 25%
   slower and 5% faster than `dr_flac` depending on the file, roughly 700 to 2,600 times faster than real time.
 * **Behaviour you can reason about.** Corrupt data is resynchronised over, seeking needs no seek
