@@ -7,6 +7,8 @@
 //   * 4..24 bits per sample, 1..8 channels, fixed and variable block sizes, all subframe
 //     types, every Rice mode, all stereo modes, seeking by binary search over frame headers,
 //     resynchronisation over damaged frames
+//   * every frame's CRC-16 is verified; a frame that fails it is output as silence of the right
+//     length (so timing and seek positions stay correct) instead of as wrong samples
 //
 // Register convention inside this file (private; the exported entry points set it up):
 //   x19 = peep *           x20 = read pointer into the file
@@ -58,6 +60,7 @@
 .equ L_TGT,    408
 .equ L_MID,    416
 .equ L_FIX,    424                    // order of a fixed predictor, 0 for LPC
+.equ L_CRC,    432                    // the CRC-16 stored in the frame
 
     .text
 
@@ -146,6 +149,95 @@ FUNCL br_init
     b.hi  \target
 2:
 .endm
+
+// ---- CRC-16 (FLAC: polynomial 0x8005, start 0, MSB first, no reflection) -----------------------
+// Table k holds, for every byte value, the CRC of that byte followed by k zero bytes. The
+// assembler builds the eight tables itself (no generator script): 8 x 512 bytes.
+.macro CRC16TAB k
+    .set i, 0
+    .rept 256
+        .set c, i << 8
+        .rept 8 * (\k + 1)
+            .if c & 0x8000
+                .set c, ((c << 1) ^ 0x8005) & 0xFFFF
+            .else
+                .set c, (c << 1) & 0xFFFF
+            .endif
+        .endr
+        .hword c
+        .set i, i + 1
+    .endr
+.endm
+
+    .balign 16
+crc16_tab:
+    .set k, 0
+    .rept 8
+        CRC16TAB k
+        .set k, k + 1
+    .endr
+
+// crc16: x1 = bytes, x2 = count -> w0. 8 bytes per step (slicing-by-8): the CRC only mixes into
+// the first two bytes, so the other six table lookups do not wait for it. Clobbers x1-x15.
+FUNCL crc16
+    mov   w0, #0
+    adr   x8, crc16_tab
+    cmp   x2, #8
+    b.lo  .Lc16_t
+    add   x9, x8, #512                // tables for 1 .. 7 zero bytes after the byte
+    add   x10, x8, #1024
+    add   x11, x8, #1536
+    add   x12, x8, #2048
+    add   x13, x8, #2560
+    add   x14, x8, #3072
+    add   x15, x8, #3584
+.Lc16_l8:
+    ldr   x3, [x1], #8                // b0 is the low byte
+    lsr   w4, w0, #8
+    eor   w4, w4, w3
+    and   w4, w4, #0xFF               // (crc >> 8) ^ b0
+    and   w5, w0, #0xFF
+    ubfx  x6, x3, #8, #8
+    eor   w5, w5, w6                  // (crc & 255) ^ b1
+    ldrh  w0, [x15, x4, lsl #1]
+    ldrh  w7, [x14, x5, lsl #1]
+    eor   w0, w0, w7
+    ubfx  x6, x3, #16, #8
+    ldrh  w7, [x13, x6, lsl #1]
+    eor   w0, w0, w7
+    ubfx  x6, x3, #24, #8
+    ldrh  w7, [x12, x6, lsl #1]
+    eor   w0, w0, w7
+    ubfx  x6, x3, #32, #8
+    ldrh  w7, [x11, x6, lsl #1]
+    eor   w0, w0, w7
+    ubfx  x6, x3, #40, #8
+    ldrh  w7, [x10, x6, lsl #1]
+    eor   w0, w0, w7
+    ubfx  x6, x3, #48, #8
+    ldrh  w7, [x9, x6, lsl #1]
+    eor   w0, w0, w7
+    lsr   x6, x3, #56
+    ldrh  w7, [x8, x6, lsl #1]
+    eor   w0, w0, w7
+    sub   x2, x2, #8
+    cmp   x2, #8
+    b.hs  .Lc16_l8
+.Lc16_t:
+    cbz   x2, .Lc16_d
+.Lc16_t1:
+    ldrb  w3, [x1], #1
+    lsr   w4, w0, #8
+    eor   w4, w4, w3
+    and   w4, w4, #0xFF
+    lsl   w0, w0, #8
+    and   w0, w0, #0xFFFF
+    ldrh  w5, [x8, x4, lsl #1]
+    eor   w0, w0, w5
+    subs  x2, x2, #1
+    b.ne  .Lc16_t1
+.Lc16_d:
+    ret
 
 // ============================================================================
 // Frame header: leaves block size, channel assignment, bits per sample and the first sample
@@ -907,6 +999,24 @@ FUNCL stereo_fix
     b.ne  .Lst_s1
     ret
 
+// silence_block: zero every channel's block (a frame whose CRC-16 did not match)
+FUNCL silence_block
+    ldr   x0, [x19, #S_PLANE0]
+    ldr   w1, [x19, #P_CH]
+    ldr   w2, [x19, #S_MAXBLK]
+    ldr   w3, [x28, #L_BS]
+.Lsb_c:
+    mov   x4, x0
+    mov   w5, w3
+.Lsb_z:
+    str   wzr, [x4], #4
+    subs  w5, w5, #1
+    b.ne  .Lsb_z
+    add   x0, x0, x2, lsl #2
+    subs  w1, w1, #1
+    b.ne  .Lsb_c
+    ret
+
 // ============================================================================
 // Body of a frame whose header was just parsed. w0 = 1 ok, 0 error.
 // ============================================================================
@@ -954,10 +1064,11 @@ FUNCL decode_body
     ldr   w1, [x28, #L_CH]
     cmp   w0, w1
     b.lo  .Lb_chan
-    and   w0, w22, #7                 // pad to a byte, then skip the CRC-16
+    and   w0, w22, #7                 // pad to a byte, then read the CRC-16
     bl    br_get
     mov   w0, #16
     bl    br_get
+    str   w0, [x28, #L_CRC]           // the CRC-16 stored in the frame
     CHECK_OVERRUN .Lb_fail
     ldr   x1, [x19, #P_SRC]
     sub   x0, x20, x1
@@ -965,6 +1076,19 @@ FUNCL decode_body
     sub   x0, x0, x22
     lsr   x0, x0, #3
     str   x0, [x19, #S_NEXT]
+    ldr   x3, [x28, #L_HSTART]        // CRC-16 over the whole frame, header to the last audio byte
+    sub   x2, x0, #2
+    sub   x2, x2, x3
+    add   x1, x1, x3
+    bl    crc16
+    ldr   w1, [x28, #L_CRC]
+    cmp   w0, w1
+    b.eq  .Lb_crcok
+    bl    silence_block               // damaged: silence of the right length, not wrong samples
+    ldr   x0, [x28, #L_HSTART]        // the length it claimed cannot be trusted either: look for the
+    add   x0, x0, #1                  // next valid frame header from just after this one's first byte
+    str   x0, [x19, #S_NEXT]
+.Lb_crcok:
     bl    stereo_fix
     ldr   w0, [x28, #L_BS]
     str   w0, [x19, #S_BLKLEN]

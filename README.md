@@ -7,9 +7,9 @@ kernel, set free from the player. Peep is a music player that is just a screen;
 Liberated Peep is what is left when you take the screen away: the part that turns
 an audio file into samples, small enough to drop into any program that can call C.
 
-Version **0.3.0**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
+Version **0.3.1**, built from **Peep 0.2.11**, for **x86-64 and ARM64**. This repository is called `lib-Peep`.
 
-* **About 6 KB of pure assembly** for WAV and FLAC together, hand-written for both x86-64 and ARM64
+* **About 10 KB of pure assembly** for WAV and FLAC together (4 KB of that is CRC tables), hand-written for both x86-64 and ARM64
 * **No libc, no `malloc`, no threads, no system calls, no global state**
 * **You pull the audio**: call `peep_fill` from your audio callback and get stereo samples
 * **You own the memory**: nothing is allocated behind your back
@@ -55,10 +55,10 @@ the build system: assemble `peep.asm` and `flac.asm` yourself
 | File | Code size | What |
 |---|---|---|
 | `peep.asm` | 1.3 KB | `peep_open / fill / seek / close`, built-in 16-bit PCM WAV (plain, extensible, odd chunks, unknown length, truncated), volume, channel mapping to stereo |
-| `flac.asm` | 4.2 KB | native FLAC decoder: 4 to 24 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table |
+| `flac.asm` | 8.6 KB | native FLAC decoder: 4 to 24 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table, CRC-16 checked frames (4 KB of the size is the CRC tables) |
 | `abi.inc` | | System V and Microsoft x64 glue, so one source builds for both |
 | `arm64/peep.s` | 1.4 KB | the same core in AArch64 assembly (NEON for volume) |
-| `arm64/flac.s` | 4.6 KB | the same FLAC decoder in AArch64 assembly (NEON for stereo and output) |
+| `arm64/flac.s` | 9.0 KB | the same FLAC decoder in AArch64 assembly (NEON for stereo and output), CRC-16 checked |
 | `arm64/abi_a64.inc` | | AArch64 glue: calling convention, symbol naming |
 | `peep.h` | | the whole public API |
 | `examples/codec_drflac.c` | | a 20-line codec adapter (wraps `dr_flac`): the model for adding any other format |
@@ -86,17 +86,21 @@ RAM, same machine, against `dr_flac` (the C decoder Peep used):
 
 | FLAC file | dr_flac | Liberated Peep | |
 |---|---|---|---|
-| level 0 (fixed predictors) | 2027x realtime | 1853x | -9% |
-| level 5 (the usual default) | 1451x | 1459x | +1% |
-| level 8 | 1165x | 1284x | +10% |
-| level 12 | 917x | 1005x | +10% |
-| mono | 2201x | 2544x | +16% |
-| 5.1 | 960x | 1078x | +12% |
-| 96 kHz | 754x | 668x | -11% |
-| 24-bit | 1429x | 1196x | -16% |
+| level 0 (fixed predictors) | 2184x realtime | 1875x | -14% |
+| level 2 | 2358x realtime | 1953x | -17% |
+| level 5 (the usual default) | 1669x realtime | 1523x | -9% |
+| level 8 | 1292x realtime | 1346x | +4% |
+| level 12 | 1043x realtime | 1073x | +3% |
+| mono | 2468x realtime | 2585x | +5% |
+| 5.1 | 1084x realtime | 1098x | +1% |
+| 96 kHz | 831x realtime | 713x | -14% |
+| 24-bit | 1660x realtime | 1248x | -25% |
+
+Liberated Peep checks every frame's CRC-16; this table includes that cost. Measured against the same decoder
+without the check, it costs 4% to 12% (most on lightly compressed files, least on high compression levels).
 
 WAV decodes at about 140,000x realtime at full volume (it is a copy) and about 80,000x
-with volume applied. Code size: 4.2 KB for FLAC (4.6 KB on ARM64) against about 90 KB of `dr_flac`.
+with volume applied. Code size: 8.6 KB for FLAC (9.0 KB on ARM64) against about 90 KB of `dr_flac`.
 
 ## Limits
 
@@ -110,9 +114,10 @@ with volume applied. Code size: 4.2 KB for FLAC (4.6 KB on ARM64) against about 
   underscore-prefixed symbol names, which the x86 sources do not have.
 * **FLAC above 24 bits per sample is rejected**, as is a stream whose STREAMINFO block is
   missing or understates the maximum block size.
-* **The FLAC audio CRC-16 is not checked.** Frame headers are CRC-8 checked and a damaged
-  frame is skipped by resynchronising, but a bit flip inside audio data decodes to a wrong
-  sample instead of an error.
+* **A damaged FLAC frame comes out as silence, not as a decoded error.** Every frame's CRC-16 is checked. A
+  frame that fails it is replaced by silence of the same length (so timing and seek positions stay
+  right) and decoding resumes at the next valid frame. A bit flip is never turned into wrong samples.
+  The decoder cannot tell you that it happened: there is no error report yet.
 * Seeking is a binary search over frame headers; a byte pattern that looks like a valid
   header could, very rarely, mislead it.
 * Built-in WAV handles 16-bit PCM only. Other WAV formats need a codec.

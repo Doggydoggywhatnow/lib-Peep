@@ -14,7 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'bindings')
 OUT = os.path.join(ROOT, 'Downloads', 'Header Versions')
 LIBFILES = ['peep.asm', 'flac.asm', 'abi.inc', 'arm64/peep.s', 'arm64/flac.s', 'arm64/abi_a64.inc']
-VERSION, BUILT_FROM = '0.3.0', 'Peep 0.2.11'
+VERSION, BUILT_FROM = '0.3.1', 'Peep 0.2.11'
 
 BUILD_SH = r'''#!/bin/sh
 # Builds the Liberated Peep shared library for this machine from the assembly in lib/:
@@ -127,8 +127,8 @@ duplicated and 3+ channels use the first two.
 
 ## Limits
 
-x86-64 and ARM64 only. FLAC up to 24 bits per sample. 16-bit PCM WAV only. No MP3 or Vorbis. The FLAC audio CRC-16
-is not checked. Full details: https://github.com/Doggydoggywhatnow/lib-Peep
+x86-64 and ARM64 only. FLAC up to 24 bits per sample. 16-bit PCM WAV only. No MP3 or Vorbis. A FLAC frame that fails its
+CRC-16 is output as silence. Full details: https://github.com/Doggydoggywhatnow/lib-Peep
 
 ## License
 

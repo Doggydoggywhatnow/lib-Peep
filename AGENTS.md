@@ -1,6 +1,6 @@
 # AGENTS.md: using Liberated Peep (lib-Peep) in a project
 
-For AI coding agents. Liberated Peep ("Audio for All", version 0.3.0, built from Peep
+For AI coding agents. Liberated Peep ("Audio for All", version 0.3.1, built from Peep
 0.2.11) is a tiny audio-decoding library: you give it the bytes of a WAV or FLAC file and it
 hands back stereo 16-bit samples, on demand. It plays nothing by itself; your program sends
 the samples to a sound device.
@@ -108,9 +108,10 @@ shape for a library whose whole point is to be dropped into anything:
   (`work_need`) and never allocates behind your back.
 * **Real-time safety.** With no allocation, no locks and no system calls, `peep_fill` has
   predictable timing, which is what an audio callback needs.
-* **Size.** The native FLAC decoder is 4.2 KB of code on x86-64 (4.6 KB on ARM64); `dr_flac` is about
-  90 KB. The whole library, WAV and FLAC together, is 5.5 KB on x86-64 and 6.0 KB on ARM64.
-* **Speed costs nothing.** Native FLAC decodes between 16% slower and 16% faster than
+* **Size.** The native FLAC decoder is 8.6 KB of code on x86-64 (9.0 KB on ARM64), 4 KB of it the CRC-16
+  tables; `dr_flac` is about 90 KB. The whole library, WAV and FLAC together, is 10.0 KB on x86-64 and
+  10.5 KB on ARM64.
+* **Speed costs nothing you can hear.** Native FLAC (x86-64, with every frame's CRC-16 checked) decodes between 25% slower and 5% faster than
   `dr_flac` depending on the file, roughly 700 to 2,500 times faster than real time. Choosing the
   small decoder does not slow anything audible.
 * **Behaviour you can reason about.** Corrupt data is resynchronised over, seeking needs no seek
@@ -185,6 +186,7 @@ typedef struct peep_codec {
   sources (`--defsym APPLE=1`) but has never been assembled or run. Intel Macs are untested too.
 * 32-bit ARM is not supported.
 * The Windows build has been tested under Wine, not on real Windows.
-* FLAC audio data is not CRC-16 checked, so a flipped bit inside audio gives a wrong sample.
+* A damaged FLAC frame (its CRC-16 fails) is output as silence of the same length and decoding carries on;
+  there is no way yet for the caller to be told that it happened.
 * FLAC above 24 bits, MP3 and Vorbis are not handled natively.
 * WAV is 16-bit PCM only (8-bit, 24-bit and float WAV need a codec).

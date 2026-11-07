@@ -6,6 +6,8 @@
 ;     constant/verbatim/fixed/LPC subframes, every Rice mode, all stereo modes
 ;   * seeking by binary search over frame headers (CRC-8 checked), no seek table needed
 ;   * damaged data is skipped: the decoder resynchronises on the next valid frame header
+;   * every frame's CRC-16 is verified; a frame that fails it is output as silence of the right
+;     length (so timing and seek positions stay correct) instead of as wrong samples
 ;
 ; Register convention inside this file (private; the exported entry points are
 ; ordinary C-ABI functions that set it up):
@@ -72,6 +74,7 @@ L_HI     equ 400
 L_TGT    equ 408
 L_MID    equ 416
 L_FIX    equ 424                  ; order of a fixed predictor, 0 for LPC
+L_CRC    equ 432                  ; the CRC-16 stored in the frame
 
 section .text
 
@@ -180,6 +183,95 @@ crc8:
     jmp  .l
 .d: movzx eax, al
     ret
+
+; ---- CRC-16 (FLAC: polynomial 0x8005, start 0, MSB first, no reflection) ---------------------
+; Table k holds, for every byte value, the CRC of that byte followed by k zero bytes. NASM builds
+; the eight tables itself at assembly time (no generator script), 8 x 512 bytes.
+%macro CRC16TAB 1
+%assign i 0
+%assign nbits 8 * (%1 + 1)
+%rep 256
+%assign c i << 8
+%rep nbits
+%if c & 0x8000
+%assign c ((c << 1) ^ 0x8005) & 0xFFFF
+%else
+%assign c (c << 1) & 0xFFFF
+%endif
+%endrep
+    dw   c
+%assign i i + 1
+%endrep
+%endmacro
+
+    align 16
+crc16_tab:
+%assign k 0
+%rep 8
+    CRC16TAB k
+%assign k k + 1
+%endrep
+
+; crc16: rsi = bytes, rcx = count -> eax. 8 bytes per step (slicing-by-8): the CRC only mixes
+; into the first two bytes, so the other six table lookups do not wait for it.
+; Clobbers rcx, rdx, rsi, r8-r11.
+crc16:
+    xor  eax, eax
+    lea  r8, [crc16_tab]
+    cmp  rcx, 8
+    jb   .t
+.l8:mov  rdx, [rsi]
+    mov  r9d, eax
+    shr  r9d, 8
+    xor  r9d, edx
+    movzx r9d, r9b                    ; (crc >> 8) ^ b0
+    movzx r10d, al
+    mov  r11d, edx
+    shr  r11d, 8
+    xor  r10d, r11d
+    movzx r10d, r10b                  ; (crc & 255) ^ b1
+    movzx eax, word [r8 + 7 * 512 + r9 * 2]
+    xor  ax, [r8 + 6 * 512 + r10 * 2]
+    mov  r9, rdx
+    shr  r9, 16
+    movzx r9d, r9b
+    xor  ax, [r8 + 5 * 512 + r9 * 2]
+    mov  r9, rdx
+    shr  r9, 24
+    movzx r9d, r9b
+    xor  ax, [r8 + 4 * 512 + r9 * 2]
+    mov  r9, rdx
+    shr  r9, 32
+    movzx r9d, r9b
+    xor  ax, [r8 + 3 * 512 + r9 * 2]
+    mov  r9, rdx
+    shr  r9, 40
+    movzx r9d, r9b
+    xor  ax, [r8 + 2 * 512 + r9 * 2]
+    mov  r9, rdx
+    shr  r9, 48
+    movzx r9d, r9b
+    xor  ax, [r8 + 1 * 512 + r9 * 2]
+    shr  rdx, 56
+    xor  ax, [r8 + rdx * 2]
+    add  rsi, 8
+    sub  rcx, 8
+    cmp  rcx, 8
+    jae  .l8
+.t: test rcx, rcx
+    jz   .d
+.t1:movzx edx, byte [rsi]
+    mov  r9d, eax
+    shr  r9d, 8
+    xor  r9d, edx
+    movzx r9d, r9b
+    shl  eax, 8
+    movzx eax, ax
+    xor  ax, [r8 + r9 * 2]
+    inc  rsi
+    dec  rcx
+    jnz  .t1
+.d: ret
 
 ; ============================================================================
 ; Frame header: leaves block size, channel assignment, bits per sample and the
@@ -930,6 +1022,20 @@ stereo_fix:
     jnz  .s1
     ret
 
+; silence_block: zero every channel's block (a frame whose CRC-16 did not match)
+silence_block:
+    mov  rdx, [rbx + S_PLANE0]
+    mov  r8d, [rbx + P_CH]
+.s: mov  rdi, rdx
+    mov  ecx, LOC(L_BS)
+    xor  eax, eax
+    rep  stosd
+    mov  eax, [rbx + S_MAXBLK]
+    lea  rdx, [rdx + rax * 4]
+    dec  r8d
+    jnz  .s
+    ret
+
 ; ============================================================================
 ; Body of a frame whose header was just parsed. eax = 1 ok, 0 error.
 ; ============================================================================
@@ -978,6 +1084,7 @@ decode_body:
     call br_get
     mov  ecx, 16
     call br_get
+    mov  LOC(L_CRC), eax              ; the CRC-16 stored in the frame
     CHECK_OVERRUN .fail
     mov  rax, r12
     sub  rax, [rbx + P_SRC]
@@ -985,6 +1092,18 @@ decode_body:
     sub  rax, r14
     shr  rax, 3
     mov  [rbx + S_NEXT], rax
+    mov  rsi, [rbx + P_SRC]           ; CRC-16 over the whole frame, header to the last audio byte
+    add  rsi, LOC(L_HSTART)
+    lea  rcx, [rax - 2]
+    sub  rcx, LOC(L_HSTART)
+    call crc16
+    cmp  eax, LOC(L_CRC)
+    je   .crcok
+    call silence_block                ; damaged: silence of the right length, not wrong samples
+    mov  rax, LOC(L_HSTART)           ; the length it claimed cannot be trusted either: look for the
+    inc  rax                          ; next valid frame header from just after this one's first byte
+    mov  [rbx + S_NEXT], rax
+.crcok:
     call stereo_fix
     mov  eax, LOC(L_BS)
     mov  [rbx + S_BLKLEN], eax

@@ -1,4 +1,4 @@
-// Liberated Peep 0.3.0 (arm64): the core. Same API and behaviour as peep.asm (x86-64).
+// Liberated Peep 0.3.1 (arm64): the core. Same API and behaviour as peep.asm (x86-64).
 // Freestanding: no libc, no malloc, no syscalls, no writable globals. See peep.h.
 
 .include "abi_a64.inc"

@@ -2,6 +2,33 @@
 
 All notable changes to Liberated Peep.
 
+## 0.3.1
+
+**Built from Peep 0.2.11.** FLAC frames are now integrity-checked, on x86-64 and ARM64.
+
+### Fixed
+- **The FLAC audio CRC-16 was not checked**, so a bit flipped inside audio data silently decoded to a wrong
+  sample. Every frame's CRC-16 (FLAC's polynomial 0x8005, over the frame from its header to the last audio
+  byte) is now verified, in `flac.asm` and in `arm64/flac.s`. A frame that fails is output as silence of the
+  right length, so timing and seek positions stay correct, and decoding resumes at the next valid frame header.
+  (The decoder does not trust a damaged frame's own length to find the next frame.)
+- The 22 language packages in `Downloads/Header Versions/` are regenerated with the fixed library.
+
+### Cost
+- x86-64: 4% to 12% slower FLAC decoding, FLAC code 4.2 KB -> 8.6 KB. ARM64: FLAC code 4.6 KB -> 9.0 KB; its speed
+  has not been measured (the port has only been run under emulation). Almost all the growth is eight 512-byte
+  lookup tables per CPU, which the assembler builds itself (no generator); the check runs 8 bytes per step.
+
+### Tests
+- New `tools/testcrc.py` (in `make test` and `make test-arm64`) flips one bit inside the audio, or in the CRC,
+  of a random frame of a generated stream. The only allowed results are that frame silenced or that frame
+  dropped, with every other frame exact. x86-64: about 3,000 corrupted streams, none wrong. ARM64 (QEMU): about
+  750 more, none wrong. It caught a first version that trusted a damaged frame's length (2 of 400), a copy with
+  the check disabled (106 of 150 on x86-64, 70 of 100 on ARM64), and sabotaged tables, tails and byte lanes on
+  both CPUs.
+- Re-run on both CPUs: 2,505 WAV checks, 120 FLAC streams with seeks, fuzzing (x86-64 6 million more inputs,
+  ARM64 900,000 more) and valgrind. All 22 language demos, and the ARM64 and Windows shared libraries (QEMU, Wine).
+
 ## 0.3.0
 
 **Built from Peep 0.2.11.** Liberated Peep now comes ready-made for 22 programming languages.
