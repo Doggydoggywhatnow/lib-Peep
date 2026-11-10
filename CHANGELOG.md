@@ -66,6 +66,10 @@ All notable changes to Liberated Peep.
   slower, and wrong). None closes the gap and the cause of the loop's low instruction rate is still unknown; finding it needs hardware performance counters, which this VM does not provide.
 
 
+### Changed (dev branch): sample rates from 1 Hz are accepted
+- `peep_open` (both ports) now accepts 1 to 1,048,575 Hz; it was 1,000 to 1,048,575. Rate 0 is still rejected. Only the check in `peep.asm` / `arm64/peep.s` changed: the codecs just pass the rate through.
+  `tools/mkflac.py` now also makes FLAC files at 1, 8, 500 and 999 Hz, and `tools/testwav.py` plays WAV at 1 to 1,048,575 Hz and rejects 1,048,576. `make test` and `make test-arm64` pass. Docs updated.
+
 ### Tried and dropped (dev branch): inlining the bit reader's refill into the Rice loops, x86-64
 - The fast path of `br_refill` copied into both refill sites of every loop copy (no call or return). Best of 9 alternating runs: 24-bit 10.78 to 10.70 ns per frame, level 8 9.18 to 9.11: under 1%, inside the noise of a shared VM, for more code. Not kept.
   Same session: `dr_flac` on the 24-bit file 10.56 ns, so 24-bit is about 1% behind.

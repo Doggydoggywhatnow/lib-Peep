@@ -111,7 +111,7 @@ the build system: assemble `peep.asm` and `flac.asm` yourself
   undecodable frame), so a caller can now be told that damage happened.
 * **`peep_flac_metadata(p, type, index, &data)`** gives zero-copy access to STREAMINFO, SEEKTABLE, VORBIS_COMMENT,
   PICTURE and the other metadata blocks.
-* ID3v2 tags in front of a FLAC stream are skipped. Sample rates up to 1,048,575 Hz are accepted.
+* ID3v2 tags in front of a FLAC stream are skipped. Sample rates from 1 to 1,048,575 Hz are accepted (rate 0 is rejected).
 
 ## WAV at any bit depth (0.5.0)
 

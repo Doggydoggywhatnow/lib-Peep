@@ -128,7 +128,7 @@ You reserve it; `peep_open` clears all 160 bytes itself and sets `gain` to 256 (
 | 16 | 8 | len | the file's length |
 | 24 | 8 | pos | next frame to be returned (frames) |
 | 32 | 8 | total | length in frames, 0 = unknown |
-| 40 | 4 | rate | sample rate in Hz (1,000 to 1,048,575) |
+| 40 | 4 | rate | sample rate in Hz (1 to 1,048,575) |
 | 44 | 4 | channels | channels in the file (1 to 8) |
 | 48 | 4 | gain | **you write:** volume, q8: 256 = unity, 0 = silence; values above 256 count as 256 |
 | 52 | 4 | kind | 0 closed, 1 built-in WAV, 2 codec |
@@ -159,7 +159,7 @@ A codec table (`peep_codec`) is five 8-byte pointers: offset 0 `open`, 8 `read`,
 
 * **`peep_open`** tries the built-in 16-bit PCM WAV (plain and extensible) first, then each codec in `codecs` in order. `codecs` is a NULL-terminated array of 8-byte table
   addresses, or 0 for the built-in WAV alone. Get a table's address from `peep_flac()` / `peep_wavx()` (works in a static link and in a shared library); the data symbols
-  `peep_codec_flac` / `peep_codec_wavx` are the same tables. It returns 0 for anything it cannot play, including a sample rate outside 1,000 to 1,048,575 Hz or more than 8 channels.
+  `peep_codec_flac` / `peep_codec_wavx` are the same tables. It returns 0 for anything it cannot play, including a sample rate of 0 or above 1,048,575 Hz or more than 8 channels.
   **Workspace protocol:** pass `work` = 0, `work_size` = 0 first. If it returns 0 and `[p + 144]` (`work_need`) is nonzero, a codec wants that many bytes: call `peep_open` again with
   `work` = a buffer of at least that size and `work_size` = its size. If it returns 0 and `work_need` is 0, the data is not supported. FLAC needs `channels * max_blocksize * 4 + 16`
   bytes: typically 36 KB, at most 2,097,136 (8 channels, 65,535-sample blocks), so a static 2 MB buffer always suffices. WAV, wav.asm and wavc.asm's A-law / mu-law need none; wavc.asm's IMA and MS ADPCM need 80 bytes (`work_need` = 80). The second call clears `p` again, so
@@ -874,7 +874,7 @@ typedef struct peep_codec {
 
 * `open`: return 0 quickly if the data is not yours (look at the magic bytes first). On success
   set `p->rate`, `p->channels` (1 to 8) and `p->total` (frames, 0 if unknown). Rate must be
-  1,000 to 1,048,575 Hz or `peep_open` rejects it. Also set `p->bits` (0 means 16). Use `p->ctx` and `p->state[56]` for your state.
+  1 to 1,048,575 Hz or `peep_open` rejects it. Also set `p->bits` (0 means 16). Use `p->ctx` and `p->state[56]` for your state.
   Do not touch `p->pos`, `p->gain` or `p->kind`.
 * `read`: write interleaved `int16` in the file's own channel count, up to `frames` frames, and
   return how many. Return 0 only at the end of the stream. Never write more than asked.

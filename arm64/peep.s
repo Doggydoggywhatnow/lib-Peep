@@ -325,15 +325,15 @@ FUNC peep_open
     mov   w0, #16
     strh  w0, [x19, #P_BITS]
 
-    // ---- sanity: 1..8 channels, 1 kHz..768 kHz ------------------------------
+    // ---- sanity: 1..8 channels, 1..1,048,575 Hz ------------------------------
 .Lpo_validate:
     ldr   w0, [x19, #P_CH]
     sub   w0, w0, #1
     cmp   w0, #7
     b.hi  .Lpo_bad
     ldr   w0, [x19, #P_RATE]
-    sub   w0, w0, #1000
-    MOV32 w1, 1047575
+    sub   w0, w0, #1
+    MOV32 w1, 1048574
     cmp   w0, w1
     b.hi  .Lpo_bad
     mov   w0, #1
