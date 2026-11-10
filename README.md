@@ -87,7 +87,7 @@ the build system: assemble `peep.asm` and `flac.asm` yourself
 | File | Code size | What |
 |---|---|---|
 | `peep.asm` | 2.5 KB | `peep_open / fill / fill32 / seek / close`, full-resolution output, 16-bit reduction with rounding or dither, built-in 16-bit PCM WAV (plain, extensible, odd chunks, unknown length, truncated), volume, channel mapping to stereo |
-| `flac.asm` | 9.3 KB | native FLAC decoder: 4 to 31 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table, CRC-16 checked frames (4 KB of the size is the CRC tables), full-resolution output, ID3v2 skipping, damage counter, metadata access |
+| `flac.asm` | 17.8 KB (9.3 KB on `arm64`) | native FLAC decoder: 4 to 31 bit, 1 to 8 channels, fixed and variable block size, every stereo mode, seeking without a seek table, CRC-16 checked frames (4 KB of the size is the CRC tables), full-resolution output, ID3v2 skipping, damage counter, metadata access |
 | `wav.asm` | 1.1 KB | WAV extension codec: unsigned 8-bit, 12 / 16 / 20 / 24 / 32-bit PCM, 32 and 64-bit float, plain or extensible, 1 to 8 channels, full-resolution output |
 | `abi.inc` | | System V and Microsoft x64 glue, so one source builds for both |
 | `arm64/peep.s` | 2.5 KB | the same core in AArch64 assembly |
@@ -180,7 +180,7 @@ Liberated Peep checks every frame's CRC-16; this table includes that cost. Measu
 without the check, it costs 4% to 12% (most on lightly compressed files, least on high compression levels).
 
 WAV decodes at about 140,000x realtime at full volume (it is a copy) and about 80,000x
-with volume applied. Code size: 9.3 KB for FLAC (9.7 KB on ARM64) against about 90 KB of `dr_flac`.
+with volume applied. Code size: 17.8 KB for FLAC on x86-64 on `dev` (9.3 KB on `arm64`; 9.7 KB on ARM64) against about 90 KB of `dr_flac`.
 
 ## Limits
 

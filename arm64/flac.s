@@ -1516,8 +1516,10 @@ FUNCL flac_open
     rev   w3, w3
     lsr   w4, w3, #16                 // min block size
     and   w3, w3, #0xFFFF             // max block size
-    cbz   w4, .Lfo_fail
-    cbz   w3, .Lfo_fail
+    cbnz  w3, 1f                      // max 0 = unknown (some streaming encoders): allow the largest legal block
+    mov   w3, #0xFFFF
+1:  cmp   w4, #0
+    csel  w4, w3, w4, eq              // unknown min: replaced from the first frame below
     str   w4, [x9, #S_BLK0]
     str   w3, [x9, #S_MAXBLK]
     ldr   x3, [x10, #18]
@@ -1571,8 +1573,21 @@ FUNCL flac_open
     str   x12, [x9, #P_CTX]
     add   x7, x7, #16
     str   x7, [x9, #S_PLANE0]
-    mov   w0, #1
-    ret
+    // nominal block size of a fixed-blocksize stream, from the first frame itself: sample numbers of such frames are
+    // frame number x block size, and STREAMINFO's min block size is that only if the encoder filled it in as the spec says
+    // (some write the short last block, or 0); the first frame's own size always is.
+    ENTER
+    mov   x19, x9
+    ldr   x4, [x19, #S_START]
+    bl    br_init
+    bl    parse_header
+    cbz   w0, 2f
+    ldr   w1, [x28, #L_VARBS]
+    cbnz  w1, 2f
+    ldr   w1, [x28, #L_BS]
+    str   w1, [x19, #S_BLK0]
+2:  mov   w0, #1
+    LEAVE
 .Lfo_fail:
     mov   w0, #0
     ret

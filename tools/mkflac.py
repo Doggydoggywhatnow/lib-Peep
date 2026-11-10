@@ -275,6 +275,11 @@ def gen_case(rng):
     if variable: minbs, maxbs = min(sz), max(sz)
     else: minbs = maxbs = sz[0] if len(sz) == 1 else bs0
     if not variable and len(sz) > 1: minbs = maxbs = bs0
+    if not variable and len(sz) > 1:                       # what real encoders write: the true minimum (a short last block), or "unknown" (0)
+        q = rng.random()
+        if q < .3: minbs, maxbs = min(sz), max(sz)
+        elif q < .4: minbs = maxbs = 0
+        elif q < .45: minbs, maxbs = 0, bs0
     blocks = [(0, streaminfo(minbs, maxbs, rate, nch, bps, total if rng.random() < .9 else 0))]
     for _ in range(rng.choice([0, 0, 1, 2, 4])):
         blocks.append((rng.choice([1, 2, 3, 4, 6, 5]), bytes(rng.randrange(256) for _ in range(rng.choice([0, 1, 33, 200, 3000])))))

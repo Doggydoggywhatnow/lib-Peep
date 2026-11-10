@@ -67,6 +67,10 @@ $(B)/flac_nobmi2.o: flac.asm abi.inc | $(B);   $(NASM) -dNOBMI2 -f elf64 $< -o $
 $(B)/libpeep_nobmi2.a: $(B)/peep.o $(B)/flac_nobmi2.o $(B)/wav.o $(B)/wavc.o;   rm -f $@; ar rcs $@ $^
 $(B)/peepdump_nobmi2: tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nobmi2.a
 	$(CC) -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nobmi2.a -lm
+$(B)/flac_noclmul.o: flac.asm abi.inc | $(B);   $(NASM) -dNOCLMUL -f elf64 $< -o $@
+$(B)/libpeep_noclmul.a: $(B)/peep.o $(B)/flac_noclmul.o $(B)/wav.o $(B)/wavc.o;   rm -f $@; ar rcs $@ $^
+$(B)/peepdump_noclmul: tools/peepdump.c $(B)/drflac.o $(B)/libpeep_noclmul.a
+	$(CC) -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep_noclmul.a -lm
 $(B)/libpeep_nosimd.a: $(B)/peep.o $(B)/flac_nosimd.o $(B)/wav.o $(B)/wavc.o;   rm -f $@; ar rcs $@ $^
 $(B)/peepdump_nosimd: tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nosimd.a
 	$(CC) -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep_nosimd.a -lm
@@ -74,7 +78,9 @@ $(B)/peepdump_static: tools/peepdump.c $(B)/drflac.o $(B)/libpeep.a
 	$(CC) -static -O2 -o $@ tools/peepdump.c $(B)/drflac.o $(B)/libpeep.a -lm
 $(B)/run_nosse41.sh: $(B)/peepdump_static
 	printf '#!/bin/sh\nexec $(QEMUX) -cpu qemu64 $(CURDIR)/$(B)/peepdump_static "$$@"\n' > $@; chmod +x $@
-test-simd: $(B)/peepdump $(B)/peepdump_nosimd $(B)/peepdump_nobmi2 $(SEEDDIR)
+test-simd: $(B)/peepdump $(B)/peepdump_nosimd $(B)/peepdump_nobmi2 $(B)/peepdump_noclmul $(SEEDDIR)
+	python3 tools/mkflac.py --run 60 --seed 11 --tool $(B)/peepdump_noclmul
+	python3 tools/testhires.py --run 12 --seed 7 --tool $(B)/peepdump_noclmul
 	python3 tools/mkflac.py --run 60 --seed 9 --tool $(B)/peepdump_nobmi2
 	python3 tools/testhires.py --run 12 --seed 5 --tool $(B)/peepdump_nobmi2
 	python3 tools/mkflac.py --run 60 --seed 7 --tool $(B)/peepdump_nosimd

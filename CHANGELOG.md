@@ -66,6 +66,18 @@ All notable changes to Liberated Peep.
   slower, and wrong). None closes the gap and the cause of the loop's low instruction rate is still unknown; finding it needs hardware performance counters, which this VM does not provide.
 
 
+### Changed (dev branch): optimised x86-64 FLAC decoder, and two FLAC behaviour fixes in both ports
+- `flac.asm` is replaced by an optimised decoder written by another AI session from the previous `flac.asm`, then reviewed, built against this repo's `abi.inc`, and checked here: `make test` (200,000 fuzz inputs, audio suite, `make test-simd`) passes in full,
+  and a callee-saved-register check over open, fill, fill32, seek, metadata and close on a 6-channel 24-bit file passes. Same exported symbols, same `peep` layout, same workspace size. What changed: one 8-byte refill (inlined in the Rice loops), `lzcnt` and `shrx`/`shlx`
+  in the BMI2 loops (BMI2 and LZCNT both required), a 3-instruction zig-zag, a separate loop per predictor (fixed orders 1 to 4 written out, LPC order 4, scalar, SSE4.1 order 8, order 12 and 16 and up: 20 loop copies chosen once per subframe), end-aligned coefficients
+  with the older taps arranged for `pshufd`+`pmuldq`, a PCLMULQDQ frame CRC-16 (`-dNOCLMUL` to force the table code), a tight signed-value reader for verbatim, warm-up and escape data, and SIMD mono and row-wise multichannel interleaving.
+- Speed (same VM, alternating runs, best of 5, ns per frame; `cur` = the build before this change, which already had the fusion, `bsr` fix, reordering and BMI2): level 0 9.32 to **7.10**, level 2 9.20 to **7.29**, level 5 12.17 to **9.34**, level 8 13.38 to **9.88**,
+  level 12 15.76 to **12.20**, mono 7.95 to **5.65**, 5.1 18.96 to **13.96**, 96 kHz 11.70 to **8.96**, 24-bit 15.75 to **12.69**. Against `dr_flac` on the same run: 24-bit is now **25% faster** (15.87), the 16-bit files 32 to 100% faster.
+  This VM was slower than earlier runs, so compare the ratios, not the absolute figures. `flac.o` grows from 12.3 KB to 17.8 KB of code. Not ported to ARM64 (speed unmeasured there anyway).
+- **Behaviour fixes, in both ports, with new tests:** (1) STREAMINFO min or max block size 0 ("unknown", written by some streaming encoders) used to make `peep_open` fail; now max 0 counts as 65,535 and min 0 as the max. (2) Fixed-blocksize frames' sample positions were frame number x STREAMINFO's min block size, which is wrong
+  when an encoder writes the short last block as the minimum: seeking then landed in the wrong place or returned nothing. The first frame's own block size is now used. `tools/mkflac.py` now writes the true minimum (a short last block), `0` and `0,max` in fixed-blocksize streams: the previous decoder fails 18 of 300 such cases (and the ARM64 port failed 3 of 120 before the fix); the new code passes all.
+  `make test-simd` also runs a `-dNOCLMUL` build.
+
 ### Changed (dev branch): sample rates from 1 Hz are accepted
 - `peep_open` (both ports) now accepts 1 to 1,048,575 Hz; it was 1,000 to 1,048,575. Rate 0 is still rejected. Only the check in `peep.asm` / `arm64/peep.s` changed: the codecs just pass the rate through.
   `tools/mkflac.py` now also makes FLAC files at 1, 8, 500 and 999 Hz, and `tools/testwav.py` plays WAV at 1 to 1,048,575 Hz and rejects 1,048,576. `make test` and `make test-arm64` pass. Docs updated.
