@@ -5,6 +5,8 @@ For AI coding agents. Liberated Peep ("Audio for All", version 0.5.0, built from
 hands back stereo 16-bit samples, on demand. It plays nothing by itself; your program sends
 the samples to a sound device.
 
+**The goal of lib-Peep is to provide accurate and clean audio data: NO FILTERS.** The samples a caller gets are the samples in the file, exactly, with nothing added, removed or altered: no EQ, no resampling, no normalisation, no limiting, no noise shaping, no silent clipping or channel dropping. Anything that changes the audio (`gain`, `dither`, a downmix) is something the caller asks for, never a default, and any loss a call cannot avoid (a clamp, dropped channels, a damaged frame) must be reported to the caller, not hidden. When adding or changing code, keep the output bit-exact to the source and test it against ground truth.
+
 **Branches.** `main` is the assembly and documentation only, at the old x86-64 version 0.1.2. **`dev` (this branch) has the library
 at 0.5.0, identical to `arm64` except for two speed experiments in `flac.asm` and `arm64/flac.s` (fused fixed-predictor and LPC decoding in the residual loop, and a vector LPC loop: SSE4.1 chosen by `cpuid` on x86-64, NEON on ARM64) and the new compressed-WAV codec (`wavc.asm`, `arm64/wavc.s`); see the CHANGELOG, plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
 `third_party/`, `tools/`), the audio-quality tests, and the AppImage tooling. `arm64` has all of that and also the 22 language packages
