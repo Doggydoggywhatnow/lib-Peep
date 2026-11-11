@@ -815,11 +815,12 @@ FUNCL decode_residual
     b.ne  .Lres_ez
     b     .Lres_edone
 .Lres_eraw:
-    mov   w0, w11
-    bl    br_gets
-    str   w0, [x24], #4
-    subs  w9, w9, #1
-    b.ne  .Lres_eraw
+    mov   w4, w11
+    mov   x5, x24
+    mov   w6, w9
+    bl    rd_signed
+    mov   x24, x5
+    mov   w9, #0
 .Lres_edone:
     ldr   w0, [x28, #L_FIX]
     cbnz  w0, .Lres_efix
@@ -851,6 +852,38 @@ FUNCL decode_residual
     mov   w0, #0
     ldp   x26, x27, [sp, #16]
     ldp   x30, x25, [sp], #48
+    ret
+
+// rd_signed: w4 = n bits (1 to 32), x5 = destination, w6 = count (>= 1): read count signed n-bit values (verbatim subframes, warm-up samples, escape
+// partitions) with one arithmetic shift of the cache each. x5 is left pointing past the last one. Clobbers x0 to x3, x5, w6, w7, x8.
+FUNCL rd_signed
+    str   x30, [sp, #-16]!
+    mov   w7, #64
+    sub   w7, w7, w4
+    sub   x8, x23, #8
+.Lrds_l:
+    cmp   w22, w4
+    b.hs  .Lrds_h
+    cmp   x20, x8
+    b.hi  .Lrds_slow
+    ldr   x0, [x20]                   // the 8-byte refill (see REFILL8)
+    rev   x0, x0
+    lsr   x1, x0, x22
+    orr   x21, x21, x1
+    add   x20, x20, #7
+    sub   x20, x20, x22, lsr #3
+    orr   w22, w22, #56
+    b     .Lrds_h
+.Lrds_slow:
+    bl    br_refill
+.Lrds_h:
+    asr   x0, x21, x7                 // the top n bits, sign extended
+    lsl   x21, x21, x4
+    sub   w22, w22, w4
+    str   w0, [x5], #4
+    subs  w6, w6, #1
+    b.ne  .Lrds_l
+    ldr   x30, [sp], #16
     ret
 
 // ============================================================================
@@ -1051,14 +1084,11 @@ FUNCL decode_subframe
     b.ne  .Lsf_cl
     b     .Lsf_wasted
 .Lsf_verb:
-    ldr   x12, [x28, #L_PLANE]
-    mov   w13, w11
-.Lsf_vl:
-    ldr   w0, [x28, #L_WIDTH]
-    bl    br_gets
-    str   w0, [x12], #4
-    subs  w13, w13, #1
-    b.ne  .Lsf_vl
+    cbz   w11, .Lsf_wasted
+    ldr   w4, [x28, #L_WIDTH]
+    ldr   x5, [x28, #L_PLANE]
+    mov   w6, w11
+    bl    rd_signed
     b     .Lsf_wasted
 .Lsf_fixed:
     sub   w0, w9, #8                  // order 0..4
@@ -1082,15 +1112,11 @@ FUNCL decode_subframe
     ldr   w0, [x28, #L_ORDER]
     cmp   w0, w11
     b.hi  .Lsf_bad
-    mov   w13, w0
-    cbz   w13, .Lsf_nowarm
-    ldr   x12, [x28, #L_PLANE]
-.Lsf_wu:
-    ldr   w0, [x28, #L_WIDTH]
-    bl    br_gets
-    str   w0, [x12], #4
-    subs  w13, w13, #1
-    b.ne  .Lsf_wu
+    mov   w6, w0
+    cbz   w6, .Lsf_nowarm
+    ldr   w4, [x28, #L_WIDTH]
+    ldr   x5, [x28, #L_PLANE]
+    bl    rd_signed
 .Lsf_nowarm:
     cmp   w9, #32
     b.lo  .Lsf_resid
@@ -1126,6 +1152,18 @@ FUNCL decode_subframe
     cbz   w0, .Lsf_ok
     ldr   x1, [x28, #L_PLANE]
     ldr   w2, [x28, #L_BS]
+    dup   v1.4s, w0                   // shift the wasted bits back in, 4 samples at a time
+    lsr   w3, w2, #2
+    cbz   w3, .Lsf_wt
+.Lsf_wv:
+    ld1   {v0.4s}, [x1]
+    sshl  v0.4s, v0.4s, v1.4s
+    st1   {v0.4s}, [x1], #16
+    subs  w3, w3, #1
+    b.ne  .Lsf_wv
+.Lsf_wt:
+    ands  w2, w2, #3
+    b.eq  .Lsf_ok
 .Lsf_ws:
     ldr   w3, [x1]
     lsl   w3, w3, w0
@@ -1381,7 +1419,7 @@ FUNCL decode_next
     ret
 
 // interleave32: w0 = frames to hand out from the decoded block, to L_OUT as int32, each sample
-// left-justified: value << (32 - bps). Clobbers x0-x16, v0-v6.
+// left-justified: value << (32 - bps). Clobbers x0-x17, v0-v6.
 FUNCL interleave32
     mov   w4, w0
     ldr   w5, [x19, #P_CH]
@@ -1421,7 +1459,7 @@ FUNCL interleave32
     subs  w15, w15, #1
     b.ne  .Li3_t
     b     .Li3_done
-.Li3_gen:
+.Li3_gen:                             // mono and 3..8 channels: one pass per channel, 4 samples per step
     mov   w15, #0
     lsl   x16, x5, #2                 // output bytes per frame
 .Li3_gc:
@@ -1430,7 +1468,29 @@ FUNCL interleave32
     add   x1, x10, x0, lsl #2
     ldr   x2, [x28, #L_OUT]
     add   x2, x2, x15, lsl #2
-    mov   w3, w4
+    lsr   w17, w4, #2
+    cbz   w17, .Li3_gt
+    cmp   w5, #1
+    b.eq  .Li3_mv
+.Li3_gv:
+    ld1   {v0.4s}, [x1], #16
+    sshl  v0.4s, v0.4s, v6.4s
+    st1   {v0.s}[0], [x2], x16
+    st1   {v0.s}[1], [x2], x16
+    st1   {v0.s}[2], [x2], x16
+    st1   {v0.s}[3], [x2], x16
+    subs  w17, w17, #1
+    b.ne  .Li3_gv
+    b     .Li3_gt
+.Li3_mv:                              // mono: the output is contiguous
+    ld1   {v0.4s}, [x1], #16
+    sshl  v0.4s, v0.4s, v6.4s
+    st1   {v0.4s}, [x2], #16
+    subs  w17, w17, #1
+    b.ne  .Li3_mv
+.Li3_gt:
+    ands  w3, w4, #3
+    b.eq  .Li3_gn
 .Li3_gl:
     ldr   w0, [x1], #4
     lsl   w0, w0, w6
@@ -1438,6 +1498,7 @@ FUNCL interleave32
     add   x2, x2, x16
     subs  w3, w3, #1
     b.ne  .Li3_gl
+.Li3_gn:
     add   w15, w15, #1
     cmp   w15, w5
     b.lo  .Li3_gc
@@ -1459,7 +1520,7 @@ FUNCL interleave32
     ret
 
 // interleave: w0 = frames to hand out from the decoded block, to L_OUT.
-// int16 = (sample << max(0,16-bps)) >> max(0,bps-16), saturating. Clobbers x0-x16, v0-v6.
+// int16 = (sample << max(0,16-bps)) >> max(0,bps-16), saturating. Clobbers x0-x17, v0-v6.
 FUNCL interleave
     mov   w4, w0                      // take
     ldr   w5, [x19, #P_CH]
@@ -1507,7 +1568,7 @@ FUNCL interleave
     subs  w15, w15, #1
     b.ne  .Lil_t
     b     .Lil_done
-.Lil_gen:                             // mono and 3..8 channels: one pass per channel
+.Lil_gen:                             // mono and 3..8 channels: one pass per channel, 4 samples per step
     mov   w15, #0
     lsl   x16, x5, #1                 // output bytes per frame
 .Lil_gc:
@@ -1516,7 +1577,31 @@ FUNCL interleave
     add   x1, x10, x0, lsl #2
     ldr   x2, [x28, #L_OUT]
     add   x2, x2, x15, lsl #1
-    mov   w3, w4
+    lsr   w17, w4, #2
+    cbz   w17, .Lil_gt
+    cmp   w5, #1
+    b.eq  .Lil_mv
+.Lil_gv:
+    ld1   {v0.4s}, [x1], #16
+    sshl  v0.4s, v0.4s, v6.4s
+    sqxtn v0.4h, v0.4s
+    st1   {v0.h}[0], [x2], x16
+    st1   {v0.h}[1], [x2], x16
+    st1   {v0.h}[2], [x2], x16
+    st1   {v0.h}[3], [x2], x16
+    subs  w17, w17, #1
+    b.ne  .Lil_gv
+    b     .Lil_gt
+.Lil_mv:                              // mono: the output is contiguous
+    ld1   {v0.4s}, [x1], #16
+    sshl  v0.4s, v0.4s, v6.4s
+    sqxtn v0.4h, v0.4s
+    st1   {v0.4h}, [x2], #8
+    subs  w17, w17, #1
+    b.ne  .Lil_mv
+.Lil_gt:
+    ands  w3, w4, #3
+    b.eq  .Lil_gn
 .Lil_gl:
     ldr   w0, [x1], #4
     lsl   w0, w0, w6
@@ -1525,6 +1610,7 @@ FUNCL interleave
     add   x2, x2, x16
     subs  w3, w3, #1
     b.ne  .Lil_gl
+.Lil_gn:
     add   w15, w15, #1
     cmp   w15, w5
     b.lo  .Lil_gc
