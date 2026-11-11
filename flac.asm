@@ -1,13 +1,29 @@
 ; Liberated Peep FLAC codec: a native assembly FLAC decoder behind the peep_codec interface.
+; (optimised revision: same interface, same struct peep layout, same workspace size, bit-exact output; see the handoff doc)
 ;
 ;   * freestanding: no libc, no malloc, no syscalls, no writable globals
+;   * ID3v2 tags in front of the stream are skipped; damaged frames are counted in p->errors;
+;     read32() gives the samples at full resolution; peep_flac_metadata() hands out metadata blocks
 ;   * workspace lent by the host: channels * max_blocksize * 4 + 16 bytes (16 of them in front of the first plane)
-;   * 4..24 bits per sample, 1..8 channels, fixed and variable block sizes,
+;   * 4..31 bits per sample, 1..8 channels, fixed and variable block sizes,
 ;     constant/verbatim/fixed/LPC subframes, every Rice mode, all stereo modes
 ;   * seeking by binary search over frame headers (CRC-8 checked), no seek table needed
 ;   * damaged data is skipped: the decoder resynchronises on the next valid frame header
 ;   * every frame's CRC-16 is verified; a frame that fails it is output as silence of the right
 ;     length (so timing and seek positions stay correct) instead of as wrong samples
+;   * STREAMINFO block sizes of 0 ("unknown") are accepted; fixed-blocksize sample positions come from the first
+;     frame's own block size, so a wrong STREAMINFO minimum no longer breaks seeking
+;
+; What changed against the previous revision (details and measurements in the handoff doc):
+;   * bit reader refills 56..63 bits from one unaligned 8-byte load, inlined in the Rice loops (no call per refill)
+;   * BMI2 loops use lzcnt (no false-dependency fix-up, no xor 63); zig-zag decode is 3 instructions (shr / sbb / xor)
+;   * one Rice loop per predictor: fixed orders 1..4 each get their own copy (no per-sample order dispatch), LPC
+;     P = 4 / P = 8 / P = 12 straight-line, P >= 16 counted loop; loop chosen once per subframe through a jump table
+;   * LPC coefficients stored end-aligned with older groups pair-swapped: samples and coefficients share one negative
+;     index, the newest taps sit at fixed displacements, and SSE4.1 needs one pshufd per 4 taps (3 loads)
+;   * CRC-16 by PCLMULQDQ folding (64 bytes per step) with the slicing-by-8 table as fallback / tail
+;   * verbatim, warm-up and escape-coded samples read by a tight sar-based loop instead of a call per value
+;   * mono interleave is SIMD; 3..8 channels interleave row-wise with the shift count held in a register
 ;
 ; Register convention inside this file (private; the exported entry points are
 ; ordinary C-ABI functions that set it up):
@@ -19,14 +35,19 @@
 %include "abi.inc"
 
 ; struct peep
+P_CODEC  equ 0
 P_SRC    equ 8
 P_LEN    equ 16
 P_TOTAL  equ 32
 P_RATE   equ 40
 P_CH     equ 44
+P_KIND   equ 52
+P_CTX    equ 64
 P_WORK   equ 128
 P_WSIZE  equ 136
 P_WNEED  equ 144
+P_ERRS   equ 152                  ; u32 damaged frames met so far
+P_BITS   equ 158                  ; u16 bits per sample of the source
 
 ; FLAC state inside peep.state[] (offsets from the start of struct peep)
 S_NEXT   equ 72                   ; u64 offset of the next frame
@@ -36,7 +57,10 @@ S_BLKPOS equ 92                   ; u32 next sample to hand out
 S_MAXBLK equ 96                   ; u32 STREAMINFO max block size = plane stride
 S_BLK0   equ 100                  ; u32 STREAMINFO min block size (fixed-size streams)
 S_BPS    equ 104                  ; u32 bits per sample of the decoded block
-S_SIBPS  equ 108                  ; u32 STREAMINFO bits per sample
+S_SIBPS  equ 108                  ; u32 STREAMINFO bits per sample (low byte); bit 8 = SIMDF
+SIMDF    equ 0x100                ; set at open when cpuid reports SSE4.1: predict then uses the SIMD multiply loop
+BMI2F    equ 0x200                ; set at open when cpuid reports BMI2 and LZCNT: the Rice loops then use lzcnt / shrx / shlx / sarx
+CLMULF   equ 0x400                ; set at open when cpuid reports PCLMULQDQ and SSSE3: the frame CRC-16 then folds 64 bytes per step
 S_SPOS   equ 112                  ; u64 first sample number of the decoded block
 S_PLANE0 equ 120                  ; u64 address of plane 0 (work + 16)
 
@@ -75,10 +99,22 @@ L_TGT    equ 408
 L_MID    equ 416
 L_FIX    equ 424                  ; order of a fixed predictor, 0 for LPC
 L_CRC    equ 432                  ; the CRC-16 stored in the frame
+L_WIDE   equ 440                  ; 0: read() int16, 1: read32() int32
+L_ESCP   equ 448                  ; escape partition: where it starts
+L_ESCN   equ 456                  ; and how many samples it holds
+                                  ; 464: spare
+L_NEGP4  equ 472                  ; LPC: -(P - 4) as int64, P = order rounded up to 4: the older-tap loops count it up to 0
+L_MODE   equ 480                  ; address of the residual loop for this subframe (see decode_residual)
+L_SAFE   equ 488                  ; end of file - 8: the bit reader may load 8 bytes at any r12 <= this
+
+; LPC coefficients are stored END-ALIGNED: the coefficient of tap j (x[i - j], j = 1 newest) is the int64 slot at
+; [rbp - 576 + 256 - 8 j]. Taps order+1 .. P are zero. The loops then index samples and coefficients from the same
+; negative counter, and the newest four taps sit at fixed displacements. (The CRC-16 reuses L_COEF as a 16-byte scratch
+; buffer once all subframes are decoded.)
+%define TAP(j) [rbp - 576 + 256 - 8 * (j)]
 
 section .text
 
-fixtab: dd 1, -1, 2, 1, -3, 3, -1, 4, -6, 4     ; fixed predictors 1..4, oldest first
 
 ; ============================================================================
 ; Bit reader
@@ -87,19 +123,32 @@ br_init:                          ; r8 = byte offset
     mov  r12, [rbx + P_SRC]
     mov  r15, r12
     add  r15, [rbx + P_LEN]
+    lea  rax, [r15 - 8]
+    mov  LOC(L_SAFE), rax
     add  r12, r8
     xor  r13d, r13d
     xor  r14d, r14d
     ret
 
-; Top up the cache by 32 bits (call only with r14d < 32). Past the end of the
-; file it supplies zero bits; callers detect that with CHECK_OVERRUN.
+; Top up the cache (call only with r14d < 32). Fast path: one unaligned 8-byte load gives 56..63 valid bits
+; (Giesen's "variant 4" refill): r12 advances by whole bytes only, so r12 * 8 - r14 is still the exact read position.
+; The bits below the valid ones are then look-ahead bits of the stream (or zero), never garbage: merging the same bytes
+; again with OR is harmless, and a leading-one search that lands below r14 is caught by the Rice slow path.
+; Near the end of the file it falls back to 32 bits from single bytes, zero past the end; callers detect that with CHECK_OVERRUN.
 br_refill:
-    lea  rax, [r12 + 4]
-    cmp  rax, r15
+    cmp  r12, LOC(L_SAFE)
     ja   .slow
-    mov  eax, [r12]
-    bswap eax
+    mov  rax, [r12]
+    bswap rax
+    mov  ecx, r14d
+    shr  rax, cl
+    or   r13, rax
+    mov  ecx, 63
+    sub  ecx, r14d
+    shr  ecx, 3
+    add  r12, rcx
+    or   r14d, 56
+    ret
 .add:
     mov  ecx, 32
     sub  ecx, r14d
@@ -205,19 +254,109 @@ crc8:
 %endmacro
 
     align 16
-crc16_tab:
+crc16_tab_data:
 %assign k 0
 %rep 8
     CRC16TAB k
 %assign k k + 1
 %endrep
 
-; crc16: rsi = bytes, rcx = count -> eax. 8 bytes per step (slicing-by-8): the CRC only mixes
-; into the first two bytes, so the other six table lookups do not wait for it.
-; Clobbers rcx, rdx, rsi, r8-r11.
+; ---- CRC-16 with PCLMULQDQ -----------------------------------------------------------------------
+; Folding works for any polynomial: a 128-bit block A followed D bits later by block B can be replaced by
+; B ^ (A * x^D mod P), and because P has degree 16 the product of a 64-bit half with a 16-bit constant fits in 128 bits
+; without reduction:  A * x^D == Ahi * (x^(D+64) mod P) ^ Alo * (x^D mod P).  Four lanes fold 64 bytes per step (D = 512),
+; then the lanes fold into one (D = 128), and the last 16 + (len mod 16) bytes go through the table code. Blocks are
+; byte-reversed with pshufb because FLAC's CRC is MSB-first (the first byte is the most significant).
+; Only xmm0-xmm5 are used (xmm6+ are callee-saved on Win64). The constants are computed by NASM at assembly time.
+%macro XMODP 2
+%assign %%c 1
+%rep %2
+%assign %%c %%c << 1
+%if %%c & 0x10000
+%assign %%c %%c ^ 0x18005
+%endif
+%endrep
+%assign %1 %%c
+%endmacro
+XMODP K128, 128
+XMODP K192, 192
+XMODP K512, 512
+XMODP K576, 576
+
+    align 16
+crc_bswap: db 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0
+crc_k4:    dq K512, K576              ; low qword multiplies the low half of a lane, high qword the high half
+crc_k1:    dq K128, K192
+
+%macro CFOLD 3                        ; lane, next block (memory), constants (memory)
+    movdqa xmm4, %1
+    pclmulqdq %1, %3, 0x11
+    pclmulqdq xmm4, %3, 0x00
+    movdqu xmm5, %2
+    pshufb xmm5, [crc_bswap]
+    pxor %1, xmm4
+    pxor %1, xmm5
+%endmacro
+%macro CFOLDR 3                       ; lane %1 folded into lane %2, constants %3
+    movdqa xmm4, %1
+    pclmulqdq %1, %3, 0x11
+    pclmulqdq xmm4, %3, 0x00
+    pxor %2, %1
+    pxor %2, xmm4
+%endmacro
+
+; crc16: rsi = bytes, rcx = count -> eax. Clobbers rcx, rdx, rsi, r8-r11, xmm0-xmm5, and L_COEF (scratch).
 crc16:
     xor  eax, eax
-    lea  r8, [crc16_tab]
+    cmp  rcx, 64
+    jb   crc16_tab
+    test dword [rbx + S_SIBPS], CLMULF
+    jz   crc16_tab
+    movdqa xmm5, [crc_bswap]
+    movdqu xmm0, [rsi]
+    movdqu xmm1, [rsi + 16]
+    movdqu xmm2, [rsi + 32]
+    movdqu xmm3, [rsi + 48]
+    pshufb xmm0, xmm5
+    pshufb xmm1, xmm5
+    pshufb xmm2, xmm5
+    pshufb xmm3, xmm5
+    add  rsi, 64
+    sub  rcx, 64
+.l4:cmp  rcx, 64
+    jb   .r4
+    CFOLD xmm0, [rsi], [crc_k4]
+    CFOLD xmm1, [rsi + 16], [crc_k4]
+    CFOLD xmm2, [rsi + 32], [crc_k4]
+    CFOLD xmm3, [rsi + 48], [crc_k4]
+    add  rsi, 64
+    sub  rcx, 64
+    jmp  .l4
+.r4:CFOLDR xmm0, xmm1, [crc_k1]
+    CFOLDR xmm1, xmm2, [crc_k1]
+    CFOLDR xmm2, xmm3, [crc_k1]
+.l1:cmp  rcx, 16
+    jb   .fin
+    CFOLD xmm3, [rsi], [crc_k1]
+    add  rsi, 16
+    sub  rcx, 16
+    jmp  .l1
+.fin:
+    pshufb xmm3, [crc_bswap]          ; back to stream byte order
+    movdqa LOC(L_COEF), xmm3          ; (16-byte aligned)
+    push rsi
+    push rcx
+    lea  rsi, LOC(L_COEF)
+    mov  ecx, 16
+    call crc16_tab                    ; eax = 0 here
+    pop  rcx
+    pop  rsi
+    jmp  crc16_tab                    ; then the tail, continuing from eax
+
+; crc16_tab: table CRC-16 continuing from eax: rsi = bytes, rcx = count -> eax. 8 bytes per step (slicing-by-8): the CRC
+; only mixes into the first two bytes, so the other six table lookups do not wait for it. Clobbers rcx, rdx, rsi, r8-r11.
+crc16_tab:
+    lea  r8, [crc16_tab_data]
     cmp  rcx, 8
     jb   .t
 .l8:mov  rdx, [rsi]
@@ -314,7 +453,7 @@ parse_header:
     call br_get
     test eax, eax
     jnz  .bad
-    mov  eax, [rbx + S_SIBPS]
+    movzx eax, byte [rbx + S_SIBPS]   ; (bit 8 of the field is the SIMD flag)
     test r11d, r11d
     jz   .bpsok
     mov  eax, 8
@@ -495,7 +634,264 @@ ff_scan:
 
 ; ============================================================================
 ; Residual: Rice-coded, writes plane[order .. blocksize). Hot loop.
+; The predictor (fixed order 1 to 4, or LPC) is applied in the same loop as each sample is decoded: the predictor's
+; dependency chain then runs alongside the bit reader's instead of in a second pass. esi = the previous sample.
 ; ============================================================================
+
+; ----------------------------------------------------------------------------
+; RICE entry, mode, bmi2: the Rice residual loop for one partition. One copy per (mode, bmi2) so the loop has no mode tests.
+;   mode 0: no prediction (order 0)      1..4: fixed predictor of that order (formula specialised per order)
+;   mode 5: LPC, order 1..4 (P = 4: the newest-four tail only)
+;   mode 6: LPC, P >= 8, older taps scalar
+;   mode 7: LPC, P = 8, SSE4.1 older taps written out    8: P = 12, likewise    9: P >= 16, SSE4.1 counted loop
+;   (pmuldq: 2 lanes of signed 32 x 32 -> 64 bit, so the sum is exact for any sample width and precision)
+;   bmi2 1: lzcnt for the unary part (no false dependency, no xor fix-up), shrx / shlx / sarx shifts
+; In: r9d = samples left in the partition (>= 1), r10d = Rice parameter k, rdi = output, esi = previous sample,
+;     r12 to r15 = bit reader. The refill is inlined (8-byte load, see br_refill).
+; ----------------------------------------------------------------------------
+%macro RICE 3
+%1:
+%%rs:
+    cmp  r14d, 32
+    jae  %%c1
+    cmp  r12, LOC(L_SAFE)             ; inline refill to 56..63 bits
+    ja   %%rfs
+    mov  rax, [r12]
+    bswap rax
+%if %3
+    shrx rax, rax, r14
+%else
+    mov  ecx, r14d
+    shr  rax, cl
+%endif
+    or   r13, rax
+    mov  ecx, r14d                    ; bytes taken: (63 - r14) >> 3 = 7 - (r14 >> 3)
+    shr  ecx, 3
+    sub  r12, rcx
+    add  r12, 7
+    or   r14d, 56
+%%c1:
+%if %3
+    lzcnt rax, r13                    ; q = leading zeros; CF = 1 when the whole cache is zero
+    jc   %%long
+%else
+    xor  eax, eax                     ; breaks bsr's false dependency on rax (bsr leaves its destination unchanged for a zero source)
+    bsr  rax, r13
+    jz   %%long
+    xor  eax, 63                      ; q
+%endif
+    lea  edx, [rax + r10 + 1]         ; t = q + 1 + k bits for this sample
+    cmp  edx, r14d
+    ja   %%more                       ; not all in the valid part of the cache: slow path
+%if %3
+    mov  ecx, edx
+    neg  ecx                          ; (64 - t) mod 64
+    shrx r8, r13, rcx                 ; V = top t bits = (1 << k) | low
+    shlx r13, r13, rdx                ; drop t bits: the loop-carried work of the bit reader
+    sub  r14d, edx
+    lea  r11, [rax - 1]               ; u = V + ((q - 1) << k)
+    shlx r11, r11, r10
+    add  r8, r11
+%else
+    mov  r8, r13
+    mov  ecx, edx
+    shl  r13, cl
+    sub  r14d, edx
+    mov  ecx, 64
+    sub  ecx, edx
+    shr  r8, cl
+    lea  r11, [rax - 1]
+    mov  ecx, r10d
+    shl  r11, cl
+    add  r8, r11
+%endif
+%%zz:
+    shr  r8, 1                        ; zig-zag in three: CF = u & 1
+    sbb  eax, eax                     ; -(u & 1)
+    xor  eax, r8d                     ; (u >> 1) ^ -(u & 1): eax = the residual
+%if %2 == 0
+    mov  [rdi], eax
+%elif %2 == 1
+    add  eax, esi                     ; order 1: c1
+    mov  esi, eax
+    mov  [rdi], eax
+%elif %2 == 2
+    lea  edx, [rsi + rsi]             ; order 2: 2c1 - c2
+    sub  edx, [rdi - 8]
+    add  eax, edx
+    mov  esi, eax
+    mov  [rdi], eax
+%elif %2 == 3
+    mov  edx, esi                     ; order 3: 3(c1 - c2) + c3
+    sub  edx, [rdi - 8]
+    lea  edx, [rdx + rdx * 2]
+    add  edx, [rdi - 12]
+    add  eax, edx
+    mov  esi, eax
+    mov  [rdi], eax
+%elif %2 == 4
+    mov  edx, [rdi - 12]              ; order 4: 4(c1 + c3) - 6c2 - c4
+    add  edx, esi
+    shl  edx, 2
+    mov  r8d, [rdi - 8]
+    lea  r8d, [r8 + r8 * 2]
+    add  r8d, r8d
+    sub  edx, r8d
+    sub  edx, [rdi - 16]
+    add  eax, edx
+    mov  esi, eax
+    mov  [rdi], eax
+%else
+    mov  r8d, eax                     ; the residual
+%if %2 == 5
+    xor  edx, edx
+%elif %2 == 6
+    mov  rcx, LOC(L_NEGP4)            ; scalar older taps, 4 per pass, oldest first; rcx counts up to 0
+    xor  edx, edx
+%%mac:
+    movsxd rax, dword [rdi - 16 + rcx * 4]
+    imul rax, [rbp - 576 + 256 - 32 + rcx * 8]
+    add  rdx, rax
+    movsxd rax, dword [rdi - 12 + rcx * 4]
+    imul rax, [rbp - 576 + 256 - 16 + rcx * 8]       ; (c0, c2, c1, c3) slot order, see lpc_prep
+    add  rdx, rax
+    movsxd rax, dword [rdi - 8 + rcx * 4]
+    imul rax, [rbp - 576 + 256 - 24 + rcx * 8]
+    add  rdx, rax
+    movsxd rax, dword [rdi - 4 + rcx * 4]
+    imul rax, [rbp - 576 + 256 - 8 + rcx * 8]
+    add  rdx, rax
+    add  rcx, 4
+    jnz  %%mac
+%elif %2 == 7
+    movdqu xmm0, [rdi - 32]           ; SSE4.1, P = 8: taps 8..5 in one group, written out (no counter). x0..x3 in one load;
+    pshufd xmm1, xmm0, 0x31           ; pmuldq takes dwords 0 and 2, pshufd brings 1 and 3 down. The coefficient slots of each
+    pmuldq xmm0, TAP(8)               ; older group are stored (c0, c2, c1, c3), see lpc_prep: one shuffle, 3 loads per 4 taps.
+    pmuldq xmm1, TAP(6)               ; (samples at least 5 old: long since stored, no forwarding stall; TAP slots 16-aligned)
+    paddq xmm0, xmm1
+%elif %2 == 8
+    movdqu xmm0, [rdi - 48]           ; SSE4.1, P = 12: two groups, written out
+    pshufd xmm1, xmm0, 0x31
+    pmuldq xmm0, TAP(12)
+    pmuldq xmm1, TAP(10)
+    movdqu xmm2, [rdi - 32]
+    pshufd xmm3, xmm2, 0x31
+    pmuldq xmm2, TAP(8)
+    pmuldq xmm3, TAP(6)
+    paddq xmm0, xmm1
+    paddq xmm2, xmm3
+    paddq xmm0, xmm2
+%else
+    mov  rcx, LOC(L_NEGP4)            ; SSE4.1, P >= 16: a counted loop over the groups, rcx = -(P - 4) up to 0
+    movdqu xmm0, [rdi - 16 + rcx * 4]
+    pshufd xmm1, xmm0, 0x31
+    pmuldq xmm0, [rbp - 576 + 256 - 32 + rcx * 8]    ; 16-byte aligned: rbp is, and rcx is a multiple of 4
+    pmuldq xmm1, [rbp - 576 + 256 - 16 + rcx * 8]
+    paddq xmm0, xmm1                                 ; the first group seeds the accumulator (no pxor)
+    add  rcx, 4
+%%macv:
+    movdqu xmm1, [rdi - 16 + rcx * 4]
+    pshufd xmm2, xmm1, 0x31
+    pmuldq xmm1, [rbp - 576 + 256 - 32 + rcx * 8]
+    pmuldq xmm2, [rbp - 576 + 256 - 16 + rcx * 8]
+    paddq xmm0, xmm1
+    paddq xmm0, xmm2
+    add  rcx, 4
+    jnz  %%macv
+%endif
+%if %2 >= 7
+    movhlps xmm1, xmm0
+    paddq xmm0, xmm1
+    movq rdx, xmm0
+%endif
+    movsxd rax, dword [rdi - 16]      ; the newest four taps at fixed places: x[i-4..i-2] from memory, x[i-1] from esi, last
+    imul rax, TAP(4)
+    add  rdx, rax
+    movsxd rax, dword [rdi - 12]
+    imul rax, TAP(3)
+    add  rdx, rax
+    movsxd rax, dword [rdi - 8]
+    imul rax, TAP(2)
+    add  rdx, rax
+    movsxd rax, esi
+    imul rax, TAP(1)
+    add  rdx, rax
+    mov  ecx, LOC(L_SHIFT)
+%if %3
+    sarx rdx, rdx, rcx
+%else
+    sar  rdx, cl
+%endif
+    add  r8d, edx                     ; residual + prediction, int32 wrap
+    mov  esi, r8d
+    mov  [rdi], r8d
+%endif
+    add  rdi, 4
+    dec  r9d
+    jnz  %%rs
+    jmp  .pdone
+%%rfs:                                ; refill near the end of the file: the exact byte-wise path
+    call br_refill
+    jmp  %%c1
+%%more:                               ; eax = q
+    cmp  eax, r14d
+    jae  %%long                       ; the leading 1 is among the look-ahead bits: every valid bit is zero
+    mov  r8d, eax                     ; consume the unary part, then top up for the rest
+    mov  ecx, eax
+    shl  r13, cl
+    shl  r13, 1
+    inc  ecx
+    sub  r14d, ecx
+%%kc:
+    cmp  r14d, r10d
+    jae  %%c2
+    call br_refill                    ; r14d < k <= 30
+%%c2:
+    mov  rax, r13
+    shr  rax, 1
+    mov  ecx, 63
+    sub  ecx, r10d
+    shr  rax, cl                      ; k low bits
+    mov  ecx, r10d
+    shl  r13, cl
+    sub  r14d, r10d
+    shl  r8, cl
+    or   r8, rax                      ; u = q << k | low
+    jmp  %%zz
+%%long:                               ; the valid bits are all zero: count them and keep going
+    mov  r8, r14
+    xor  r13d, r13d                   ; drops the look-ahead bits too: the refill reloads them from r12
+    xor  r14d, r14d
+%%lg:
+    lea  rax, [r15 + 16]
+    cmp  r12, rax
+    ja   .bad                         ; ran far past the end of the file
+    call br_refill
+    xor  eax, eax
+    bsr  rax, r13
+    jnz  %%lgf
+    add  r8, r14
+    xor  r13d, r13d
+    xor  r14d, r14d
+    jmp  %%lg
+%%lgf:
+    mov  ecx, 63
+    sub  ecx, eax
+    cmp  ecx, r14d
+    jb   %%lgin
+    add  r8, r14                      ; (only after a fast 8-byte refill: the 1 is a look-ahead bit) count the valid zeros, go on
+    xor  r13d, r13d
+    xor  r14d, r14d
+    jmp  %%lg
+%%lgin:
+    add  r8, rcx
+    shl  r13, cl
+    shl  r13, 1
+    inc  ecx
+    sub  r14d, ecx
+    jmp  %%kc
+%endmacro
+
 decode_residual:
     mov  ecx, 2
     call br_get
@@ -522,7 +918,37 @@ decode_residual:
     mov  rdi, LOC(L_PLANE)
     mov  eax, LOC(L_ORDER)
     lea  rdi, [rdi + rax * 4]
+    ; ---- pick the loop once per subframe: mode (see RICE) + 8 for the BMI2 copy -> L_MODE = its address
+    mov  eax, LOC(L_FIX)              ; fixed predictor: mode = order (0..4)
+    test eax, eax
+    jnz  .msel
+    cmp  dword LOC(L_ORDER), 0
+    je   .msel                        ; order 0
+    mov  eax, 5                       ; LPC order 1..4
+    cmp  qword LOC(L_NEGP4), 0
+    je   .msel
+    mov  eax, 6                       ; LPC P >= 8 without SSE4.1
+    test dword [rbx + S_SIBPS], SIMDF
+    jz   .msel
+    mov  rcx, LOC(L_NEGP4)
+    mov  eax, 7                       ; SSE4.1 P = 8
+    cmp  rcx, -4
+    je   .msel
+    mov  eax, 8                       ; SSE4.1 P = 12
+    cmp  rcx, -8
+    je   .msel
+    mov  eax, 9                       ; SSE4.1 P >= 16
+.msel:
+    test dword [rbx + S_SIBPS], BMI2F
+    jz   .mset
+    add  eax, 10
+.mset:
+    lea  rcx, [.rtab]
+    movsxd rax, dword [rcx + rax * 4]
+    add  rax, rcx
+    mov  LOC(L_MODE), rax
 .part:
+    mov  esi, [rdi - 4]               ; previous sample; front slack makes order 0 safe too
     mov  ecx, LOC(L_PBITS)
     call br_get
     mov  r10d, eax                    ; Rice parameter k, or the escape code
@@ -534,103 +960,89 @@ decode_residual:
     je   .escape
     test r9d, r9d
     jz   .pdone
-.rs:cmp  r14d, 32
-    jb   .rf1
-.c1:bsr  rax, r13                     ; unary part: leading zero bits
-    jz   .long
-    xor  eax, 63                      ; q
-    lea  edx, [rax + r10 + 1]         ; t = q + 1 + k bits for this sample
-    cmp  edx, r14d
-    ja   .more                        ; not all in the cache: slow path
-    mov  r8, r13                      ; value, computed from the old cache:
-    mov  ecx, 64                      ;   V = top t bits = (1 << k) | low
-    sub  ecx, edx
-    shr  r8, cl
-    lea  r11, [rax - 1]               ;   u = V + ((q - 1) << k)
-    mov  ecx, r10d
-    shl  r11, cl
-    add  r8, r11
-    mov  ecx, edx                     ; the only loop-carried work: drop t bits
-    shl  r13, cl
-    sub  r14d, edx
-.zz:mov  rax, r8
-    shr  rax, 1
-    and  r8d, 1
-    neg  r8
-    xor  rax, r8                      ; zig-zag: (u >> 1) ^ -(u & 1)
-    mov  [rdi], eax
-    add  rdi, 4
-    dec  r9d
-    jnz  .rs
-    jmp  .pdone
-.more:                                ; eax = q: consume the unary part, then top up for the rest
-    mov  r8d, eax
-    mov  ecx, eax
-    shl  r13, cl
-    shl  r13, 1
-    inc  ecx
-    sub  r14d, ecx
-.kc:cmp  r14d, r10d
-    jb   .rf2
-.c2:mov  rax, r13
-    shr  rax, 1
-    mov  ecx, 63
-    sub  ecx, r10d
-    shr  rax, cl                      ; k low bits
-    mov  ecx, r10d
-    shl  r13, cl
-    sub  r14d, r10d
-    shl  r8, cl
-    or   r8, rax                      ; u = q << k | low
-    jmp  .zz
-.rf1:
-    call br_refill
-    jmp  .c1
-.rf2:
-    call br_refill
-    jmp  .c2
-.long:                                ; the cache holds only zeros: keep counting
-    mov  r8, r14
-    xor  r13d, r13d
-    xor  r14d, r14d
-.lg:lea  rax, [r15 + 16]
-    cmp  r12, rax
-    ja   .bad                         ; ran far past the end of the file
-    call br_refill
-    bsr  rax, r13
-    jnz  .lgf
-    add  r8, r14
-    xor  r13d, r13d
-    xor  r14d, r14d
-    jmp  .lg
-.lgf:
-    mov  ecx, 63
-    sub  ecx, eax
-    add  r8, rcx
-    shl  r13, cl
-    shl  r13, 1
-    inc  ecx
-    sub  r14d, ecx
-    jmp  .kc
+    jmp  qword LOC(L_MODE)
+
+    align 4
+.rtab:
+    dd .rs0 - .rtab, .rs1 - .rtab, .rs2 - .rtab, .rs3 - .rtab, .rs4 - .rtab, .rs5 - .rtab, .rs6 - .rtab, .rs7 - .rtab, .rs8 - .rtab, .rs9 - .rtab
+    dd .rb0 - .rtab, .rb1 - .rtab, .rb2 - .rtab, .rb3 - .rtab, .rb4 - .rtab, .rb5 - .rtab, .rb6 - .rtab, .rb7 - .rtab, .rb8 - .rtab, .rb9 - .rtab
+
+    align 16
+    RICE .rs0, 0, 0
+    align 16
+    RICE .rs1, 1, 0
+    align 16
+    RICE .rs2, 2, 0
+    align 16
+    RICE .rs3, 3, 0
+    align 16
+    RICE .rs4, 4, 0
+    align 16
+    RICE .rs5, 5, 0
+    align 16
+    RICE .rs6, 6, 0
+    align 16
+    RICE .rs7, 7, 0
+    align 16
+    RICE .rs8, 8, 0
+    align 16
+    RICE .rs9, 9, 0
+    align 16
+    RICE .rb0, 0, 1
+    align 16
+    RICE .rb1, 1, 1
+    align 16
+    RICE .rb2, 2, 1
+    align 16
+    RICE .rb3, 3, 1
+    align 16
+    RICE .rb4, 4, 1
+    align 16
+    RICE .rb5, 5, 1
+    align 16
+    RICE .rb6, 6, 1
+    align 16
+    RICE .rb7, 7, 1
+    align 16
+    RICE .rb8, 8, 1
+    align 16
+    RICE .rb9, 9, 1
+
 .escape:                              ; partition stored as n-bit signed integers
     mov  ecx, 5
     call br_get
     mov  r8d, eax
     test r9d, r9d
     jz   .pdone
+    mov  LOC(L_ESCP), rdi             ; remember the region: the predictor still has to be run over it
+    mov  LOC(L_ESCN), r9d
     test r8d, r8d
     jnz  .eraw
     xor  eax, eax
     mov  ecx, r9d
     rep  stosd
-    jmp  .pdone
+    jmp  .edone
 .eraw:
-    mov  ecx, r8d
-    call br_gets
-    mov  [rdi], eax
-    add  rdi, 4
-    dec  r9d
-    jnz  .eraw
+    mov  r11d, r8d
+    call rd_signed                    ; r9d samples of r11d bits to rdi
+.edone:
+    mov  eax, LOC(L_FIX)
+    test eax, eax
+    jnz  .efix
+    cmp  dword LOC(L_ORDER), 0
+    je   .erest
+    mov  rsi, LOC(L_ESCP)             ; LPC: predict only this region (its history is in the plane before it)
+    mov  r9d, LOC(L_ESCN)
+    call lpc_run
+    jmp  .erest
+.efix:
+    mov  rsi, LOC(L_ESCP)             ; fixed predictor: the same for the region
+    mov  r9d, LOC(L_ESCN)
+    call fixed_run
+.erest:
+    mov  rdi, LOC(L_ESCP)
+    mov  eax, LOC(L_ESCN)
+    lea  rdi, [rdi + rax * 4]
 .pdone:
     mov  r9d, LOC(L_PSIZE)
     dec  dword LOC(L_NPART)
@@ -641,92 +1053,101 @@ decode_residual:
     xor  eax, eax
     ret
 
+; rd_signed: r9d (>= 1) signed values of r11d (1..32) bits each from the bit reader to rdi. Clobbers rax, rcx, rdx, r9.
+; The sign extension is one sar of the cache, so this is a tight loop instead of a br_gets call per value.
+rd_signed:
+.l: cmp  r14d, r11d
+    jae  .h
+    call br_refill                    ; r14d < width <= 32
+.h: mov  rax, r13
+    mov  ecx, 64
+    sub  ecx, r11d
+    sar  rax, cl
+    mov  ecx, r11d
+    shl  r13, cl
+    sub  r14d, r11d
+    mov  [rdi], eax
+    add  rdi, 4
+    dec  r9d
+    jnz  .l
+    ret
+
 ; ============================================================================
-; LPC / fixed prediction, in place. 64-bit accumulator, so any precision and
-; any sample width is exact.
+; LPC / fixed prediction helpers. 64-bit accumulator, so any precision and any sample width is exact.
 ; ============================================================================
-predict:
-    mov  r8d, LOC(L_ORDER)
-    test r8d, r8d
-    jz   .done
-    mov  r9d, LOC(L_BS)
-    sub  r9d, r8d
-    jbe  .done
-    mov  eax, LOC(L_FIX)
-    test eax, eax
-    jnz  .fixed
-    lea  rdi, LOC(L_COEF)
-    lea  eax, [r8 + 3]
-    and  eax, -4                      ; P = order rounded up to a multiple of 4
-    mov  edx, eax
-    sub  edx, r8d                     ; d zero coefficients go on the OLD side
-    jz   .padded
-    mov  ecx, r8d
-.mv:dec  ecx
-    mov  r10, [rdi + rcx * 8]
-    lea  r11d, [rcx + rdx]
-    mov  [rdi + r11 * 8], r10
-    test ecx, ecx
-    jnz  .mv
-.zp:mov  qword [rdi + rcx * 8], 0
+; lpc_prep: once per LPC subframe, before decode_residual: zero the coefficient slots of taps order+1 .. P
+; (P = order rounded up to a multiple of 4), store -(P - 4) for the older-tap loops, and swap the middle two slots of
+; every older group of four (taps P .. 5): a group holding x0..x3 then has its slots in the order (c0, c2, c1, c3), which is
+; what pmuldq on (x0, x2) and on (x1, x3) wants. The newest four taps keep the plain TAP(j) layout.
+lpc_prep:
+    mov  ecx, LOC(L_ORDER)
+    lea  eax, [rcx + 3]
+    and  eax, -4                      ; P
+.zp:cmp  ecx, eax
+    jae  .zd
     inc  ecx
-    cmp  ecx, edx
-    jb   .zp
-.padded:
-    mov  r11, LOC(L_PLANE)
-    lea  rsi, [r11 + r8 * 4]          ; output: x[i], first predicted sample
-    shl  rdx, 2
-    sub  r11, rdx                     ; window start x[order - P] (up to 3 slots of front slack)
-    movsxd r10, dword [rsi - 4]       ; x[i-1] lives in a register: no store->load round trip
-    lea  r8d, [rax - 4]               ; the last 4 window slots are handled outside the loop
-.sample:
-    xor  eax, eax
-    xor  ecx, ecx
-    cmp  ecx, r8d
-    jae  .tail
-.mac:                                 ; 4 multiply-adds per pass, oldest samples first
-    movsxd rdx, dword [r11 + rcx * 4]
-    imul rdx, [rdi + rcx * 8]
+    mov  rdx, rcx
+    neg  rdx
+    mov  qword [rbp - 576 + 256 + rdx * 8], 0
+    jmp  .zp
+.zd:sub  eax, 4
+    neg  rax                          ; eax was zero-extended: rax = -(P - 4)
+    mov  LOC(L_NEGP4), rax
+    jz   .r
+.sw:mov  rcx, [rbp - 576 + 256 - 24 + rax * 8]   ; swap slots +8 and +16 of the group at rax
+    mov  rdx, [rbp - 576 + 256 - 16 + rax * 8]
+    mov  [rbp - 576 + 256 - 24 + rax * 8], rdx
+    mov  [rbp - 576 + 256 - 16 + rax * 8], rcx
+    add  rax, 4
+    jnz  .sw
+.r: ret
+
+; lpc_run: LPC prediction over a region, in place: rsi = &x[start], r9d = count (>= 1). The whole-subframe case is done
+; inside the Rice loops; this is for escape-coded partitions only (rare), so it is plain scalar code.
+; Clobbers rax, rcx, rdx, r8, rsi, r9.
+lpc_run:
+    mov  r8, LOC(L_NEGP4)
+.s: xor  eax, eax
+    mov  rcx, r8
+    test rcx, rcx
+    jz   .t
+.m: movsxd rdx, dword [rsi - 16 + rcx * 4]
+    imul rdx, [rbp - 576 + 256 - 32 + rcx * 8]
     add  rax, rdx
-    movsxd rdx, dword [r11 + rcx * 4 + 4]
-    imul rdx, [rdi + rcx * 8 + 8]
+    movsxd rdx, dword [rsi - 12 + rcx * 4]
+    imul rdx, [rbp - 576 + 256 - 16 + rcx * 8]       ; (c0, c2, c1, c3) slot order, see lpc_prep
     add  rax, rdx
-    movsxd rdx, dword [r11 + rcx * 4 + 8]
-    imul rdx, [rdi + rcx * 8 + 16]
+    movsxd rdx, dword [rsi - 8 + rcx * 4]
+    imul rdx, [rbp - 576 + 256 - 24 + rcx * 8]
     add  rax, rdx
-    movsxd rdx, dword [r11 + rcx * 4 + 12]
-    imul rdx, [rdi + rcx * 8 + 24]
+    movsxd rdx, dword [rsi - 4 + rcx * 4]
+    imul rdx, [rbp - 576 + 256 - 8 + rcx * 8]
     add  rax, rdx
-    add  ecx, 4
-    cmp  ecx, r8d
-    jb   .mac
-.tail:                                ; x[i-4..i-2] from memory, newest term last, from the register
-    movsxd rdx, dword [r11 + rcx * 4]
-    imul rdx, [rdi + rcx * 8]
+    add  rcx, 4
+    jnz  .m
+.t: movsxd rdx, dword [rsi - 16]
+    imul rdx, TAP(4)
     add  rax, rdx
-    movsxd rdx, dword [r11 + rcx * 4 + 4]
-    imul rdx, [rdi + rcx * 8 + 8]
+    movsxd rdx, dword [rsi - 12]
+    imul rdx, TAP(3)
     add  rax, rdx
-    movsxd rdx, dword [r11 + rcx * 4 + 8]
-    imul rdx, [rdi + rcx * 8 + 16]
+    movsxd rdx, dword [rsi - 8]
+    imul rdx, TAP(2)
     add  rax, rdx
-    mov  rdx, r10
-    imul rdx, [rdi + rcx * 8 + 24]
+    movsxd rdx, dword [rsi - 4]
+    imul rdx, TAP(1)
     add  rax, rdx
     mov  ecx, LOC(L_SHIFT)
     sar  rax, cl
     add  eax, [rsi]
     mov  [rsi], eax
-    movsxd r10, eax
     add  rsi, 4
-    add  r11, 4
     dec  r9d
-    jnz  .sample
-.done:
+    jnz  .s
     ret
-.fixed:                               ; fixed predictors: previous samples in registers, wrap-around int32
-    mov  rsi, LOC(L_PLANE)
-    lea  rsi, [rsi + r8 * 4]          ; &x[order]
+
+; fixed_run: fixed predictors over a region: rsi = &x[start], r9d = count, eax = order (1..4)
+fixed_run:
     cmp  eax, 2
     jb   .f1
     je   .f2
@@ -839,47 +1260,25 @@ decode_subframe:
     rep  stosd
     jmp  .wasted
 .verb:
-    mov  ecx, LOC(L_WIDTH)
-    call br_gets
-    mov  [rdi], eax
-    add  rdi, 4
-    dec  r10d
-    jnz  .verb
+    mov  r9d, r10d
+    mov  r11d, LOC(L_WIDTH)
+    call rd_signed
     jmp  .wasted
 .fixed:
     lea  eax, [r8 - 8]                ; order 0..4
     mov  LOC(L_ORDER), eax
     mov  LOC(L_FIX), eax
-    mov  dword LOC(L_SHIFT), 0
-    test eax, eax
-    jz   .warm
-    lea  ecx, [rax - 1]
-    imul ecx, eax
-    shr  ecx, 1
-    lea  rsi, [fixtab]
-    lea  rsi, [rsi + rcx * 4]
-    lea  rdi, LOC(L_COEF)
-    mov  ecx, eax
-.fc:movsxd rdx, dword [rsi]
-    mov  [rdi], rdx
-    add  rsi, 4
-    add  rdi, 8
-    dec  ecx
-    jnz  .fc
+    mov  dword LOC(L_SHIFT), 0        ; (the fixed formulas are written out in the Rice loops: no coefficients to set up)
 .warm:
     mov  eax, LOC(L_ORDER)
     cmp  eax, r10d
     ja   .bad
-    mov  r11d, eax
-    test r11d, r11d
+    test eax, eax
     jz   .nowarm
+    mov  r9d, eax                     ; warm-up samples
+    mov  r11d, LOC(L_WIDTH)
     mov  rdi, LOC(L_PLANE)
-.wu:mov  ecx, LOC(L_WIDTH)
-    call br_gets
-    mov  [rdi], eax
-    add  rdi, 4
-    dec  r11d
-    jnz  .wu
+    call rd_signed
 .nowarm:
     cmp  r8d, 32
     jb   .resid
@@ -894,18 +1293,24 @@ decode_subframe:
     test eax, eax
     js   .bad
     mov  LOC(L_SHIFT), eax
-    mov  r11d, LOC(L_ORDER)
-    lea  rsi, LOC(L_COEF)
+    xor  r11d, r11d                   ; j - 1: the first coefficient is the newest tap's (j = 1)
 .cf:mov  ecx, LOC(L_PRECIS)
     call br_gets
-    mov  [rsi + r11 * 8 - 8], rax     ; first coefficient is the newest sample's
-    dec  r11d
-    jnz  .cf
+    inc  r11d
+    mov  rdx, r11
+    neg  rdx
+    mov  [rbp - 576 + 256 + rdx * 8], rax    ; TAP(j), end-aligned
+    cmp  r11d, LOC(L_ORDER)
+    jb   .cf
 .resid:
-    call decode_residual
+    cmp  dword LOC(L_FIX), 0
+    jne  .rr
+    cmp  dword LOC(L_ORDER), 0
+    je   .rr
+    call lpc_prep                     ; LPC: zero the padding taps; decode_residual then predicts as it decodes
+.rr:call decode_residual
     test eax, eax
     jz   .bad
-    call predict
 .wasted:
     mov  ecx, LOC(L_WASTED)
     test ecx, ecx
@@ -1100,6 +1505,7 @@ decode_body:
     cmp  eax, LOC(L_CRC)
     je   .crcok
     call silence_block                ; damaged: silence of the right length, not wrong samples
+    inc  dword [rbx + P_ERRS]
     mov  rax, LOC(L_HSTART)           ; the length it claimed cannot be trusted either: look for the
     inc  rax                          ; next valid frame header from just after this one's first byte
     mov  [rbx + S_NEXT], rax
@@ -1141,7 +1547,10 @@ decode_next:
 .body:
     call decode_body
     test eax, eax
-    jz   .resync
+    jnz  .okret
+    inc  dword [rbx + P_ERRS]         ; a frame that could not be decoded
+    jmp  .resync
+.okret:
     ret
 .eof:
     mov  rax, [rbx + P_LEN]
@@ -1158,6 +1567,46 @@ decode_next:
 ; int open(peep *p, const void *data, size_t len)
 FUNCL flac_open, FLOC
     ARGS rbx, r12, r13
+    xor  r14d, r14d                   ; bytes of ID3v2 tag(s) in front of the stream
+.id3:
+    cmp  r13, 10 + 42
+    jb   .noid3
+    mov  eax, [r12]
+    and  eax, 0xFFFFFF
+    cmp  eax, 0x334449                ; 'ID3'
+    jne  .noid3
+    mov  eax, [r12 + 6]               ; four 7-bit size bytes
+    test eax, 0x80808080
+    jnz  .noid3
+    bswap eax
+    mov  edx, eax
+    and  edx, 0x7F
+    mov  ecx, eax
+    shr  ecx, 8
+    and  ecx, 0x7F
+    shl  ecx, 7
+    or   edx, ecx
+    mov  ecx, eax
+    shr  ecx, 16
+    and  ecx, 0x7F
+    shl  ecx, 14
+    or   edx, ecx
+    shr  eax, 24
+    shl  eax, 21
+    or   edx, eax                     ; tag size
+    add  rdx, 10
+    test byte [r12 + 5], 0x10         ; footer present
+    jz   .nofoot
+    add  rdx, 10
+.nofoot:
+    lea  rax, [rdx + 42]
+    cmp  rax, r13
+    ja   .noid3
+    add  r12, rdx
+    sub  r13, rdx
+    add  r14, rdx
+    jmp  .id3
+.noid3:
     cmp  r13, 42
     jb   .fail
     cmp  dword [r12], 'fLaC'
@@ -1174,10 +1623,12 @@ FUNCL flac_open, FLOC
     mov  edx, eax
     shr  edx, 16                      ; min block size
     movzx eax, ax                     ; max block size
+    test eax, eax                     ; 0 = unknown (some streaming encoders): allow the largest legal block
+    jnz  .maxok
+    mov  eax, 65535
+.maxok:
     test edx, edx
-    jz   .fail
-    test eax, eax
-    jz   .fail
+    cmovz edx, eax                    ; unknown min: replaced from the first frame below
     mov  [rbx + S_BLK0], edx
     mov  [rbx + S_MAXBLK], eax
     mov  rax, [r12 + 18]
@@ -1197,9 +1648,10 @@ FUNCL flac_open, FLOC
     inc  ecx
     cmp  ecx, 4
     jb   .fail
-    cmp  ecx, 24
+    cmp  ecx, 31
     ja   .fail
     mov  [rbx + S_SIBPS], ecx
+    mov  [rbx + P_BITS], cx           ; the source's bit depth, for the caller
     mov  rcx, 0xFFFFFFFFF
     and  rax, rcx
     mov  [rbx + P_TOTAL], rax
@@ -1226,11 +1678,76 @@ FUNCL flac_open, FLOC
     je   .fail
     cmp  [rbx + P_WSIZE], rax
     jb   .fail
+    add  rsi, r14                     ; offsets are from the start of the file, ID3 included
     mov  [rbx + S_NEXT], rsi
     mov  [rbx + S_START], rsi
+    lea  rax, [r14 + 4]
+    mov  [rbx + P_CTX], rax           ; where the metadata blocks start (for peep_flac_metadata)
     mov  rax, [rbx + P_WORK]
     add  rax, 16
     mov  [rbx + S_PLANE0], rax
+    ; ---- CPU features -> flag bits in S_SIBPS (build with -dNOSIMD / -dNOBMI2 / -dNOCLMUL to force the plain code) ----
+    push rbx
+    mov  eax, 1                       ; leaf 1: ECX bit 19 SSE4.1, bit 9 SSSE3, bit 1 PCLMULQDQ
+    cpuid
+    mov  r8d, ecx
+    xor  eax, eax                     ; max leaf
+    cpuid
+    xor  r9d, r9d
+    cmp  eax, 7
+    jb   .noleaf7
+    mov  eax, 7
+    xor  ecx, ecx
+    cpuid
+    mov  r9d, ebx                     ; leaf 7: EBX bit 8 BMI2
+.noleaf7:
+    mov  eax, 0x80000000
+    cpuid
+    xor  r10d, r10d
+    cmp  eax, 0x80000001
+    jb   .noext
+    mov  eax, 0x80000001
+    cpuid
+    mov  r10d, ecx                    ; ECX bit 5 LZCNT (ABM)
+.noext:
+    pop  rbx
+    xor  eax, eax
+%ifndef NOSIMD
+    bt   r8d, 19
+    jnc  .f1
+    or   eax, SIMDF
+.f1:
+%endif
+%ifndef NOBMI2
+    bt   r9d, 8
+    jnc  .f2
+    bt   r10d, 5
+    jnc  .f2
+    or   eax, BMI2F                   ; the BMI2 loops also use lzcnt, so both are required
+.f2:
+%endif
+%ifndef NOCLMUL
+    bt   r8d, 1
+    jnc  .f3
+    bt   r8d, 9
+    jnc  .f3
+    or   eax, CLMULF
+.f3:
+%endif
+    or   [rbx + S_SIBPS], eax
+    ; ---- nominal block size of a fixed-blocksize stream, from the first frame itself --------------------------------
+    ; Sample numbers of fixed-blocksize frames are frame number x block size. STREAMINFO's min block size is that only if the
+    ; encoder filled it in as the spec says (some write the short last block, or 0); the first frame's own size is always it.
+    mov  r8, [rbx + S_START]
+    call br_init
+    call parse_header
+    test eax, eax
+    jz   .nofirst
+    cmp  dword LOC(L_VARBS), 0
+    jne  .nofirst
+    mov  eax, LOC(L_BS)
+    mov  [rbx + S_BLK0], eax
+.nofirst:
     mov  eax, 1
     RET_
 .fail:
@@ -1240,6 +1757,14 @@ FUNCL flac_open, FLOC
 ; size_t read(peep *p, int16_t *out, size_t frames)
 FUNCL flac_read, FLOC
     ARGS rbx, rax, rcx
+    mov  dword LOC(L_WIDE), 0
+    jmp  flac_rd
+
+; size_t read32(peep *p, int32_t *out, size_t frames): every sample left-justified (<< 32 - bits)
+FUNCL flac_read32, FLOC
+    ARGS rbx, rax, rcx
+    mov  dword LOC(L_WIDE), 1
+flac_rd:
     mov  LOC(L_OUT), rax
     mov  LOC(L_FRAMES), rcx
     mov  qword LOC(L_GOT), 0
@@ -1257,7 +1782,12 @@ FUNCL flac_read, FLOC
     mov  rax, LOC(L_FRAMES)
     cmp  rcx, rax
     cmova rcx, rax
+    cmp  dword LOC(L_WIDE), 0
+    jne  .w32
     call interleave
+    jmp  .loop
+.w32:
+    call interleave32
     jmp  .loop
 .done:
     mov  rax, LOC(L_GOT)
@@ -1265,6 +1795,9 @@ FUNCL flac_read, FLOC
 
 ; interleave: ecx = frames to hand out from the decoded block, to L_OUT.
 ; Output int16 = (sample << max(0,16-bps)) >> max(0,bps-16).
+; Mono and stereo are SIMD; 3..8 channels go frame by frame (row-wise), so the output is written sequentially instead of
+; in one strided pass per channel, with the shift count held in cl. r12 is free here (the bit reader is re-initialised
+; for every frame).
 interleave:
     mov  r8d, ecx
     mov  r10d, [rbx + P_CH]
@@ -1281,7 +1814,78 @@ interleave:
     mov  LOC(L_RS), ecx
     movd xmm5, ecx
     cmp  r10d, 2
-    jne  .gen
+    je   .stereo
+    mov  r9d, [rbx + S_BLKPOS]
+    mov  rsi, [rbx + S_PLANE0]
+    lea  rsi, [rsi + r9 * 4]          ; channel 0 at the read position
+    mov  rdx, LOC(L_OUT)
+    jb   .mono
+    mov  r9d, [rbx + S_MAXBLK]
+    shl  r9, 2                        ; plane stride in bytes
+    mov  r11d, r8d
+    mov  ecx, LOC(L_RS)
+    test ecx, ecx
+    jnz  .rr
+    mov  ecx, LOC(L_LS)
+.rl:mov  rdi, rsi                     ; bps <= 16: shift left
+    mov  r12d, r10d
+.rlc:
+    mov  eax, [rdi]
+    shl  eax, cl
+    mov  [rdx], ax
+    add  rdi, r9
+    add  rdx, 2
+    dec  r12d
+    jnz  .rlc
+    add  rsi, 4
+    dec  r11d
+    jnz  .rl
+    jmp  .done
+.rr:mov  rdi, rsi                     ; bps > 16: arithmetic shift right
+    mov  r12d, r10d
+.rrc:
+    mov  eax, [rdi]
+    sar  eax, cl
+    mov  [rdx], ax
+    add  rdi, r9
+    add  rdx, 2
+    dec  r12d
+    jnz  .rrc
+    add  rsi, 4
+    dec  r11d
+    jnz  .rr
+    jmp  .done
+.mono:
+    mov  ecx, r8d
+    shr  ecx, 3
+    jz   .mt
+.m8:movdqu xmm0, [rsi]
+    movdqu xmm1, [rsi + 16]
+    pslld xmm0, xmm4
+    psrad xmm0, xmm5
+    pslld xmm1, xmm4
+    psrad xmm1, xmm5
+    packssdw xmm0, xmm1
+    movdqu [rdx], xmm0
+    add  rsi, 32
+    add  rdx, 16
+    dec  ecx
+    jnz  .m8
+.mt:mov  r9d, r8d
+    and  r9d, 7
+    jz   .done
+.m1:mov  eax, [rsi]
+    mov  ecx, LOC(L_LS)
+    shl  eax, cl
+    mov  ecx, LOC(L_RS)
+    sar  eax, cl
+    mov  [rdx], ax
+    add  rsi, 4
+    add  rdx, 2
+    dec  r9d
+    jnz  .m1
+    jmp  .done
+.stereo:
     mov  r9d, [rbx + S_BLKPOS]
     mov  rsi, [rbx + S_PLANE0]
     mov  eax, [rbx + S_MAXBLK]
@@ -1328,32 +1932,6 @@ interleave:
     add  rdx, 4
     dec  r9d
     jnz  .t1
-    jmp  .done
-.gen:                                 ; mono and 3..8 channels: one pass per channel
-    xor  r11d, r11d
-    lea  rdi, [r10 * 2]               ; output bytes per frame
-.gc:mov  eax, [rbx + S_MAXBLK]
-    imul rax, r11
-    mov  ecx, [rbx + S_BLKPOS]
-    add  rax, rcx
-    mov  rsi, [rbx + S_PLANE0]
-    lea  rsi, [rsi + rax * 4]
-    mov  rdx, LOC(L_OUT)
-    lea  rdx, [rdx + r11 * 2]
-    mov  r9d, r8d
-.gl:mov  eax, [rsi]
-    mov  ecx, LOC(L_LS)
-    shl  eax, cl
-    mov  ecx, LOC(L_RS)
-    sar  eax, cl
-    mov  [rdx], ax
-    add  rsi, 4
-    add  rdx, rdi
-    dec  r9d
-    jnz  .gl
-    inc  r11d
-    cmp  r11d, r10d
-    jb   .gc
 .done:
     mov  eax, r8d
     add  [rbx + S_BLKPOS], eax
@@ -1361,6 +1939,116 @@ interleave:
     add  LOC(L_GOT), rax
     imul rax, r10
     shl  rax, 1
+    add  LOC(L_OUT), rax
+    ret
+
+; interleave32: ecx = frames to hand out from the decoded block, to L_OUT as int32, each
+; sample left-justified: value << (32 - bps). Same structure as interleave.
+interleave32:
+    mov  r8d, ecx
+    mov  r10d, [rbx + P_CH]
+    mov  eax, 32
+    sub  eax, [rbx + S_BPS]
+    mov  LOC(L_LS), eax
+    movd xmm4, eax
+    cmp  r10d, 2
+    je   .stereo
+    mov  r9d, [rbx + S_BLKPOS]
+    mov  rsi, [rbx + S_PLANE0]
+    lea  rsi, [rsi + r9 * 4]
+    mov  rdx, LOC(L_OUT)
+    jb   .mono
+    mov  r9d, [rbx + S_MAXBLK]
+    shl  r9, 2
+    mov  r11d, r8d
+    mov  ecx, LOC(L_LS)
+.rf:mov  rdi, rsi
+    mov  r12d, r10d
+.rc:mov  eax, [rdi]
+    shl  eax, cl
+    mov  [rdx], eax
+    add  rdi, r9
+    add  rdx, 4
+    dec  r12d
+    jnz  .rc
+    add  rsi, 4
+    dec  r11d
+    jnz  .rf
+    jmp  .done
+.mono:
+    mov  ecx, r8d
+    shr  ecx, 3
+    jz   .mt
+.m8:movdqu xmm0, [rsi]
+    movdqu xmm1, [rsi + 16]
+    pslld xmm0, xmm4
+    pslld xmm1, xmm4
+    movdqu [rdx], xmm0
+    movdqu [rdx + 16], xmm1
+    add  rsi, 32
+    add  rdx, 32
+    dec  ecx
+    jnz  .m8
+.mt:mov  r9d, r8d
+    and  r9d, 7
+    jz   .done
+    mov  ecx, LOC(L_LS)
+.m1:mov  eax, [rsi]
+    shl  eax, cl
+    mov  [rdx], eax
+    add  rsi, 4
+    add  rdx, 4
+    dec  r9d
+    jnz  .m1
+    jmp  .done
+.stereo:
+    mov  r9d, [rbx + S_BLKPOS]
+    mov  rsi, [rbx + S_PLANE0]
+    mov  eax, [rbx + S_MAXBLK]
+    lea  rdi, [rsi + rax * 4]
+    lea  rsi, [rsi + r9 * 4]
+    lea  rdi, [rdi + r9 * 4]
+    mov  rdx, LOC(L_OUT)
+    mov  ecx, r8d
+    shr  ecx, 2
+    jz   .tail
+.v: movdqu xmm0, [rsi]
+    movdqu xmm1, [rdi]
+    pslld xmm0, xmm4
+    pslld xmm1, xmm4
+    movdqa xmm2, xmm0
+    punpckldq xmm0, xmm1              ; L0 R0 L1 R1
+    punpckhdq xmm2, xmm1              ; L2 R2 L3 R3
+    movdqu [rdx], xmm0
+    movdqu [rdx + 16], xmm2
+    add  rsi, 16
+    add  rdi, 16
+    add  rdx, 32
+    dec  ecx
+    jnz  .v
+.tail:
+    mov  r9d, r8d
+    and  r9d, 3
+    jz   .done
+    mov  ecx, LOC(L_LS)
+.t1:mov  eax, [rsi]
+    shl  eax, cl
+    mov  [rdx], eax
+    mov  eax, [rdi]
+    shl  eax, cl
+    mov  [rdx + 4], eax
+    add  rsi, 4
+    add  rdi, 4
+    add  rdx, 8
+    dec  r9d
+    jnz  .t1
+.done:
+    mov  eax, r8d
+    add  [rbx + S_BLKPOS], eax
+    sub  LOC(L_FRAMES), rax
+    add  LOC(L_GOT), rax
+    imul rax, r10
+    shl  rax, 2
     add  LOC(L_OUT), rax
     ret
 
@@ -1414,6 +2102,70 @@ FUNCL flac_seek, FLOC
     mov  [rbx + S_BLKPOS], eax
 .r: RET_
 
+; size_t peep_flac_metadata(peep *p, int type, int index, const void **data)
+; Zero-copy access to the index-th metadata block of the given type (0 STREAMINFO, 1 PADDING, 2 APPLICATION,
+; 3 SEEKTABLE, 4 VORBIS_COMMENT, 5 CUESHEET, 6 PICTURE) of a file opened through peep_codec_flac.
+; Returns the block's length and stores its address in *data (data may be NULL), or returns (size_t)-1
+; when there is no such block or p is not a FLAC file. The address is inside the memory you gave peep_open.
+FUNC peep_flac_metadata, 0
+    ARGS rbx, r12, r13, r14
+    cmp  dword [rbx + P_KIND], 2
+    jne  .no
+    call peep_flac
+    cmp  rax, [rbx + P_CODEC]
+    jne  .no
+    mov  rsi, [rbx + P_CTX]           ; offset of the first block header
+    mov  r8, [rbx + P_SRC]
+    mov  r9, [rbx + P_LEN]
+.blk:
+    lea  rax, [rsi + 4]
+    cmp  rax, r9
+    ja   .no
+    mov  eax, [r8 + rsi]
+    bswap eax
+    mov  ecx, eax
+    and  eax, 0xFFFFFF                ; length
+    shr  ecx, 24                      ; last-flag | type
+    lea  rdx, [rsi + 4]               ; body
+    lea  r10, [rdx + rax]             ; end of body
+    cmp  r10, r9
+    ja   .no
+    mov  r11d, ecx
+    and  r11d, 0x7F
+    cmp  r11d, r12d
+    jne  .next
+    test r13d, r13d
+    jz   .hit
+    dec  r13d
+.next:
+    test cl, 0x80
+    jnz  .no
+    mov  rsi, r10
+    jmp  .blk
+.hit:
+    test r14, r14
+    jz   .hz
+    lea  rcx, [r8 + rdx]
+    mov  [r14], rcx
+.hz:RET_
+.no:
+    mov  rax, -1
+    RET_
+
+; const peep_codec *peep_flac(void): the codec table's address, for languages whose FFI can import
+; functions but not data symbols. (Position independent, so it also works in a shared library.)
+%ifdef WIN64
+global peep_flac
+peep_flac:
+    lea  rax, [rel peep_codec_flac]
+    ret
+%else
+global peep_flac:function
+peep_flac:
+    mov  rax, [rel peep_codec_flac wrt ..got]
+    ret
+%endif
+
 ; ============================================================================
 %ifdef WIN64
 section .rdata align=8
@@ -1421,7 +2173,7 @@ section .rdata align=8
 section .data.rel.ro progbits alloc noexec write align=8
 %endif
 global peep_codec_flac
-peep_codec_flac: dq flac_open, flac_read, flac_seek, 0
+peep_codec_flac: dq flac_open, flac_read, flac_seek, 0, flac_read32
 
 %ifndef WIN64
 section .note.GNU-stack noalloc noexec nowrite progbits
