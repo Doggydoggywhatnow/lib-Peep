@@ -1,0 +1,25 @@
+{
+ "name": "Free Pascal",
+ "folder": "FreePascal",
+ "fence": "pascal",
+ "ffi": "`external` procedure declarations",
+ "run": "fpc -v0 -Fl. -k-rpath=$PWD demo.pas >/dev/null && ./demo",
+ "needs": "Free Pascal 3.0 or newer (also fine for Lazarus projects) and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Free Pascal 3.2.2, Linux x86-64.",
+ "notes": [
+  "`Peep.pas` contains `{$linklib c}`. Free Pascal does not link libc by default, and without it a program that loads a shared library crashes inside the dynamic loader when it exits.",
+  "The unit is in `Peep.pas`; the class is `TPeep`.",
+  "`Read` returns at most 4096 frames per call."
+ ],
+ "files": [
+  [
+   "Peep.pas",
+   "the binding: unit `Peep`, class `TPeep`"
+  ],
+  [
+   "demo.pas",
+   "demo: decodes the test files and prints checksums"
+  ]
+ ]
+}

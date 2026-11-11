@@ -1,0 +1,25 @@
+{
+ "name": "LuaJIT",
+ "fence": "lua",
+ "ffi": "LuaJIT's built-in `ffi` library",
+ "run": "luajit demo.lua",
+ "needs": "LuaJIT 2.0 or newer and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "LuaJIT 2.1, Linux x86-64.",
+ "notes": [
+  "LuaJIT's FFI declares functions with a C-syntax string (`ffi.cdef`). That string lives inside `peep.lua`; there is no separate header file.",
+  "This needs LuaJIT. Plain PUC Lua (5.x) has no built-in FFI.",
+  "`read` returns at most 4096 frames per call."
+ ],
+ "folder": "LuaJIT",
+ "files": [
+  [
+   "peep.lua",
+   "the binding: `Peep` module"
+  ],
+  [
+   "demo.lua",
+   "decodes the test files and prints checksums"
+  ]
+ ]
+}

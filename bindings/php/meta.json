@@ -1,0 +1,25 @@
+{
+ "name": "PHP",
+ "fence": "php",
+ "ffi": "PHP FFI extension (`FFI::cdef`)",
+ "run": "php -d ffi.enable=1 demo.php",
+ "needs": "PHP 7.4 or newer with the FFI extension enabled and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "PHP 8.3, Linux x86-64.",
+ "notes": [
+  "PHP's FFI declares functions with a C-syntax string (`FFI::cdef`). That string lives inside `peep.php`; there is no separate header file.",
+  "Run PHP with `-d ffi.enable=1` (or set `ffi.enable=1` in php.ini).",
+  "`read` returns at most 4096 frames per call."
+ ],
+ "folder": "PHP",
+ "files": [
+  [
+   "peep.php",
+   "the binding: `Peep` class"
+  ],
+  [
+   "demo.php",
+   "decodes the test files and prints checksums"
+  ]
+ ]
+}

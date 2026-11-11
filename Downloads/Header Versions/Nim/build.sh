@@ -1,0 +1,33 @@
+#!/bin/sh
+# Builds the Liberated Peep shared library for this machine from the assembly in lib/:
+#   Linux x86-64   -> libpeep.so   (needs nasm and ld)
+#   Linux ARM64    -> libpeep.so   (needs as and ld)
+#   Windows x64    -> peep.dll     (MSYS2/MinGW: needs nasm and gcc; or CC=x86_64-w64-mingw32-gcc)
+# macOS is not supported yet.
+set -e
+cd "$(dirname "$0")/lib"
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)
+    nasm -f elf64 peep.asm -o peep.o
+    nasm -f elf64 flac.asm -o flac.o
+    nasm -f elf64 wav.asm -o wav.o
+    nasm -f elf64 wavc.asm -o wavc.o
+    ld -shared -z noexecstack -o ../libpeep.so peep.o flac.o wav.o wavc.o ;;
+  Linux-aarch64|Linux-arm64)
+    as -I arm64 arm64/peep.s -o peep.o
+    as -I arm64 arm64/flac.s -o flac.o
+    as -I arm64 arm64/wav.s -o wav.o
+    as -I arm64 arm64/wavc.s -o wavc.o
+    ld -shared -z noexecstack -o ../libpeep.so peep.o flac.o wav.o wavc.o ;;
+  MINGW64*|MSYS*|CYGWIN*|Windows*)
+    nasm -f win64 -DWIN64 peep.asm -o peep.obj
+    nasm -f win64 -DWIN64 flac.asm -o flac.obj
+    nasm -f win64 -DWIN64 wav.asm -o wav.obj
+    nasm -f win64 -DWIN64 wavc.asm -o wavc.obj
+    ${CC:-gcc} -shared -nostdlib -Wl,--entry=0 -Wl,--export-all-symbols -o ../peep.dll peep.obj flac.obj wav.obj wavc.obj ;;
+  *)
+    echo "Liberated Peep: unsupported platform $(uname -s)-$(uname -m) (supported: Linux x86-64, Linux ARM64, Windows x64)" >&2
+    exit 1 ;;
+esac
+rm -f peep.o flac.o wav.o wavc.o peep.obj flac.obj wav.obj wavc.obj
+echo "built the Liberated Peep shared library"

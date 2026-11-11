@@ -1,0 +1,12 @@
+const { Peep } = require('./peep');
+
+const peep = new Peep(require('fs').readFileSync('song.flac'));   // WAV or FLAC, from memory
+console.log(peep.rate, peep.channels, peep.total);
+for (;;) {
+  const samples = peep.read(1024);        // Int16Array of interleaved stereo samples
+  if (samples.length === 0) break;
+  play(samples);                          // your audio output
+}
+peep.seek(44100);                         // jump to frame 44100
+peep.setGain(128);                        // half volume
+peep.close();

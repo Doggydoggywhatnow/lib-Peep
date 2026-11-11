@@ -1,0 +1,28 @@
+{
+ "name": "Java",
+ "fence": "java",
+ "ffi": "java.lang.foreign (Foreign Function & Memory API)",
+ "run": "sh run.sh",
+ "needs": "JDK 21 (uses the preview FFM API) or JDK 22 and newer and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "OpenJDK 21, Linux x86-64.",
+ "notes": [
+  "Uses the standard Foreign Function & Memory API, so there is no JNI and no extra library. On JDK 21 it is a preview feature, so `run.sh` compiles with `--enable-preview`; on JDK 22+ it is final and `run.sh` compiles normally.",
+  "`read` returns at most 4096 frames per call."
+ ],
+ "folder": "Java",
+ "files": [
+  [
+   "Peep.java",
+   "the binding: class `Peep`"
+  ],
+  [
+   "Demo.java",
+   "demo: decodes the test files and prints checksums"
+  ],
+  [
+   "run.sh",
+   "compiles and runs the demo (picks the right flags for your JDK)"
+  ]
+ ]
+}

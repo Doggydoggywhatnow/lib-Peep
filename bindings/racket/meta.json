@@ -1,0 +1,23 @@
+{
+ "name": "Racket",
+ "fence": "racket",
+ "ffi": "`ffi/unsafe` (built into Racket)",
+ "run": "racket demo.rkt",
+ "needs": "Racket 8.0 or newer and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Racket 8.10, Linux x86-64.",
+ "notes": [
+  "`peep-read` returns at most 4096 frames per call."
+ ],
+ "folder": "Racket",
+ "files": [
+  [
+   "peep.rkt",
+   "the binding: module `peep`"
+  ],
+  [
+   "demo.rkt",
+   "decodes the test files and prints checksums"
+  ]
+ ]
+}

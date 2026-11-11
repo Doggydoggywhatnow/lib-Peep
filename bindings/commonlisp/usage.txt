@@ -1,0 +1,11 @@
+;; sbcl --script your-program.lisp
+(load "peep.lisp")
+
+(let ((pe (peep:open-peep (slurp "song.flac"))))        ; WAV or FLAC bytes
+  (format t "~a ~a ~a~%" (peep:peep-rate pe) (peep:peep-channels pe) (peep:peep-total pe))
+  (loop for samples = (peep:read-peep pe 1024)           ; list of interleaved stereo int16
+        while samples
+        do (play samples))                               ; your audio output
+  (peep:seek-peep pe 44100)                              ; jump to frame 44100
+  (peep:set-peep-gain pe 128)                            ; half volume
+  (peep:close-peep pe))

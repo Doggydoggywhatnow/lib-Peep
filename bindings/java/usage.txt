@@ -1,0 +1,12 @@
+// javac --release 21 --enable-preview ... (JDK 22+: plain javac)
+byte[] file = Files.readAllBytes(Path.of("song.flac"));
+try (Peep peep = new Peep(file)) {                // WAV or FLAC, from memory
+    System.out.println(peep.rate() + " " + peep.channels() + " " + peep.total());
+    for (;;) {
+        short[] samples = peep.read(1024);        // interleaved stereo
+        if (samples.length == 0) break;
+        play(samples);                            // your audio output
+    }
+    peep.seek(44100);                             // jump to frame 44100
+    peep.setGain(128);                            // half volume
+}

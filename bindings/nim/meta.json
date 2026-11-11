@@ -1,0 +1,24 @@
+{
+ "name": "Nim",
+ "fence": "nim",
+ "ffi": "`importc` with the `dynlib` pragma",
+ "run": "LD_LIBRARY_PATH=. nim c -d:release --hints:off --verbosity:0 -r demo.nim",
+ "needs": "Nim 1.6 or newer and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Nim 1.6.14, Linux x86-64.",
+ "notes": [
+  "The shared library is loaded at run time, so it must be findable: run from this folder with `LD_LIBRARY_PATH=.` (as above) or install it in a system library path.",
+  "`read` returns at most 4096 frames per call."
+ ],
+ "folder": "Nim",
+ "files": [
+  [
+   "peep.nim",
+   "the binding: module `peep`"
+  ],
+  [
+   "demo.nim",
+   "demo: decodes the test files and prints checksums"
+  ]
+ ]
+}

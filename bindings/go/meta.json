@@ -1,0 +1,32 @@
+{
+ "name": "Go",
+ "fence": "go",
+ "ffi": "purego (github.com/ebitengine/purego): no cgo, no C compiler",
+ "run": "CGO_ENABLED=0 go run .",
+ "needs": "Go 1.21 or newer, network access once to fetch purego and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Go 1.24, Linux x86-64.",
+ "setup": [
+  "go mod tidy"
+ ],
+ "notes": [
+  "Loads the library with purego, so no C compiler is needed to build your program. Linux and macOS only in this binding: on Windows use `syscall.LoadLibrary` instead of `purego.Dlopen`.",
+  "The library is looked for in `$PEEP_LIB`, then the current directory, then next to the executable.",
+  "`Read` returns at most 4096 frames per call."
+ ],
+ "folder": "Go",
+ "files": [
+  [
+   "go.mod",
+   "module file (depends on purego)"
+  ],
+  [
+   "peep/peep.go",
+   "the binding: package `peep`"
+  ],
+  [
+   "main.go",
+   "demo: decodes the test files and prints checksums"
+  ]
+ ]
+}

@@ -1,0 +1,12 @@
+using LiberatedPeep;
+
+using var peep = new Peep(File.ReadAllBytes("song.flac"));   // WAV or FLAC, from memory
+Console.WriteLine($"{peep.Rate} {peep.Channels} {peep.Total}");
+for (;;)
+{
+    short[] samples = peep.Read(1024);       // interleaved stereo int16
+    if (samples.Length == 0) break;
+    Play(samples);                           // your audio output
+}
+peep.Seek(44100);                            // jump to frame 44100
+peep.SetGain(128);                           // half volume

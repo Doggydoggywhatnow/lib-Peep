@@ -1,0 +1,12 @@
+use Peep;
+
+my $peep = Peep.new(bytes => 'song.flac'.IO.slurp(:bin));   # WAV or FLAC, from memory
+say $peep.rate, ' ', $peep.channels, ' ', $peep.total;
+loop {
+    my @samples = $peep.read(1024);       # interleaved stereo int16
+    last unless @samples;
+    play(@samples);                       # your audio output
+}
+$peep.seek(44100);                        # jump to frame 44100
+$peep.set-gain(128);                      # half volume
+$peep.close;

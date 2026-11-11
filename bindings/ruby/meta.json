@@ -1,0 +1,23 @@
+{
+ "name": "Ruby",
+ "fence": "ruby",
+ "ffi": "Fiddle (Ruby standard library)",
+ "run": "ruby demo.rb",
+ "needs": "Ruby 3.0 or newer and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Ruby 3.3, Linux x86-64.",
+ "notes": [
+  "`read` returns at most 4096 frames per call."
+ ],
+ "folder": "Ruby",
+ "files": [
+  [
+   "peep.rb",
+   "the binding: `Peep` class"
+  ],
+  [
+   "demo.rb",
+   "decodes the test files and prints checksums"
+  ]
+ ]
+}

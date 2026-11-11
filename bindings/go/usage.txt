@@ -1,0 +1,15 @@
+import "peepdemo/peep"
+
+data, _ := os.ReadFile("song.flac")          // WAV or FLAC, from memory
+p, err := peep.New(data)
+fmt.Println(p.Rate(), p.Channels(), p.Total())
+for {
+	samples := p.Read(1024)                  // []int16, interleaved stereo
+	if len(samples) == 0 {
+		break
+	}
+	play(samples)                            // your audio output
+}
+p.Seek(44100)                                // jump to frame 44100
+p.SetGain(128)                               // half volume
+p.Close()

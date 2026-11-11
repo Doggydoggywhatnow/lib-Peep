@@ -1,0 +1,24 @@
+{
+ "name": "Bun",
+ "fence": "js",
+ "ffi": "Bun's built-in `bun:ffi`",
+ "run": "bun demo.js",
+ "needs": "Bun 1.0 or newer and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "Bun 1.4, Linux x86-64.",
+ "notes": [
+  "No npm packages needed: `bun:ffi` is built into Bun.",
+  "`read` returns at most 4096 frames per call."
+ ],
+ "folder": "Bun",
+ "files": [
+  [
+   "peep.js",
+   "the binding: `Peep` class (ES module)"
+  ],
+  [
+   "demo.js",
+   "decodes the test files and prints checksums"
+  ]
+ ]
+}

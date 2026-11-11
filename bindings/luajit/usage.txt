@@ -1,0 +1,12 @@
+local Peep = require("peep")
+
+local peep = Peep.new(io.open("song.flac", "rb"):read("*a"))   -- WAV or FLAC, from memory
+print(peep:rate(), peep:channels(), peep:total())
+while true do
+  local samples = peep:read(1024)          -- table of interleaved stereo int16
+  if #samples == 0 then break end
+  play(samples)                            -- your audio output
+end
+peep:seek(44100)                           -- jump to frame 44100
+peep:set_gain(128)                         -- half volume
+peep:close()

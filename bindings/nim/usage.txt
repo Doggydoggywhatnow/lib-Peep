@@ -1,0 +1,11 @@
+import peep
+
+let p = openPeep(songBytes)                    # WAV or FLAC, from memory
+echo p.rate, " ", p.channels, " ", p.total
+while true:
+  let samples = p.read(1024)                   # seq[int16], interleaved stereo
+  if samples.len == 0: break
+  play(samples)                                # your audio output
+p.seek(44100)                                  # jump to frame 44100
+p.setGain(128)                                 # half volume
+p.close()

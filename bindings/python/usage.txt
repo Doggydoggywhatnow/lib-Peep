@@ -1,0 +1,12 @@
+from peep import Peep
+
+p = Peep(open("song.flac", "rb").read())     # WAV or FLAC, from memory
+print(p.rate, p.channels, p.total)
+while True:
+    samples = p.read(1024)                   # array('h'): interleaved stereo int16
+    if not samples:
+        break
+    play(samples)                            # your audio output
+p.seek(44100)                                # jump to frame 44100
+p.set_gain(128)                              # half volume
+p.close()

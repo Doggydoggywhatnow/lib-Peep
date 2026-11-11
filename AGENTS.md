@@ -10,7 +10,7 @@ the samples to a sound device.
 **Branches.** `main` is the assembly and documentation only, at the old x86-64 version 0.1.2. **`dev` (this branch) has the library
 at 0.5.0, identical to `arm64` except for two speed experiments in `flac.asm` and `arm64/flac.s` (fused fixed-predictor and LPC decoding in the residual loop, and a vector LPC loop: SSE4.1 chosen by `cpuid` on x86-64, NEON on ARM64) and the new compressed-WAV codec (`wavc.asm`, `arm64/wavc.s`); see the CHANGELOG, plus the test suite and its C and Python support files** (`peep.h`, `Makefile`, `examples/`,
 `third_party/`, `tools/`), the audio-quality tests, and the AppImage tooling. `arm64` has all of that and also the 22 language packages
-(`Downloads/`) and their bindings (`bindings/`), which are not on this branch. The earlier x86-64-only AGENTS.md is kept at the
+(`Downloads/`) and their bindings (`bindings/`). `dev` has them too, with the `lib/` of every package refreshed to this branch's library (the `arm64` branch's packages still hold the 0.5.0 baseline library). The earlier x86-64-only AGENTS.md is kept at the
 end of this file, marked as historical: where it disagrees with the text above, the text above is right.
 
 ## Use it when / do not use it when
@@ -51,7 +51,7 @@ is only for the example adapter and the tests.
 
 ## Using it from another language
 
-On the `arm64` branch (not on `dev`), `Downloads/Header Versions/<Language>/` is a ready-made package for each of 22 languages (Bun, C#, C++, Common
+On the `dev` and `arm64` branches, `Downloads/Header Versions/<Language>/` is a ready-made package for each of 22 languages (Bun, C#, C++, Common
 Lisp, D, F#, Fortran, Free Pascal, Go, Guile, Java, LuaJIT, Nim, Node.js, Perl, PHP, Python, Racket, Raku, Ruby, Rust,
 Visual Basic .NET). If your language is listed, use that package: run its `./build.sh`, then follow its README.
 Do not mix packages: each has one binding and no C header on purpose. For a language that is not listed, call the
@@ -77,7 +77,7 @@ Remove (C, Python or packaging; the library uses none of it):
 * `peep.h`: the one C header. Sections 4 and 5 replace it.
 * `examples/` and `third_party/`: the `dr_flac` adapter and `dr_flac.h` (C).
 * `tools/`: the test programs (`*.c`) and generators (`*.py`).
-* `bindings/` and `Downloads/`: the language packages and their bindings (they exist on the `arm64` branch only).
+* `bindings/` and `Downloads/`: the language packages and their bindings (on the `dev` and `arm64` branches only).
 * `Makefile`: optional. `make` (target `build/libpeep.a`) needs only `nasm`/`as` and `ar`; the test targets need `cc` and Python.
 
 The `peep` layout was written in five places (see "If you modify this repository"); without `peep.h` it is in four.

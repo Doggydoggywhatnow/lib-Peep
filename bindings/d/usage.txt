@@ -1,0 +1,13 @@
+import peep;
+
+auto p = new Peep(cast(const(ubyte)[]) std.file.read("song.flac"));   // WAV or FLAC, from memory
+writeln(p.rate, " ", p.channels, " ", p.total);
+for (;;)
+{
+    short[] samples = p.read(1024);        // interleaved stereo
+    if (samples.length == 0) break;
+    play(samples);                         // your audio output
+}
+p.seek(44100);                             // jump to frame 44100
+p.setGain(128);                            // half volume
+p.close();

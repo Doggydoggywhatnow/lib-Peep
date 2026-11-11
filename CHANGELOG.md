@@ -66,6 +66,12 @@ All notable changes to Liberated Peep.
   slower, and wrong). None closes the gap and the cause of the loop's low instruction rate is still unknown; finding it needs hardware performance counters, which this VM does not provide.
 
 
+### Changed (dev branch): the 22 language packages carry this branch's library
+- `Downloads/` and `bindings/` (from the `arm64` branch) are now on `dev`, and every package's `lib/` holds the current library: the optimised x86-64 FLAC decoder, the ARM64 FLAC changes, the compressed-WAV codec (`wavc`), the 1 Hz rate limit and the FLAC STREAMINFO fixes.
+  `build.sh` (all 22) now also builds `wavc`, so `peep_wavc()` is in `libpeep.so` / `peep.dll`; the READMEs' Limits section says so. The zips are rebuilt.
+- The bindings themselves are unchanged: they still enable FLAC and built-in 16-bit WAV only (`peep_wavx()` and `peep_wavc()` are in the library but not switched on by any binding).
+- Checked: all 22 `build.sh` build on x86-64 and export `peep_wavc`; the Python, Ruby, Perl and PHP demos print the reference output. The ARM64 sources of the package assemble and link (cross tools); only the library was run on ARM64 (QEMU), no binding. Not run here: the other 18 bindings (their runtimes or packages are missing), Windows, macOS.
+
 ### Changed (dev branch): the ARM64 FLAC decoder gets the optimisations that carry over from x86-64
 - `arm64/flac.s`: (1) one Rice loop per predictor: fixed orders 1 to 4 each written out, LPC with 4, 8, 12 or 16 taps straight-line (the coefficients live in `v16` to `v18` and four scalar registers for the partition, so the loop loads only samples), and a NEON loop for 20 taps and up: ten loops chosen once per subframe
   instead of a test per sample; (2) one unaligned 8-byte refill, inlined (it was a 4-byte call), with the invariant that the cache may hold genuine bits below its valid count, so a leading one at or past the valid count goes to the long-run path; (3) a 2-instruction zig-zag and no zero test in the fast path;

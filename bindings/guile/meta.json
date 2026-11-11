@@ -1,0 +1,23 @@
+{
+ "name": "GNU Guile",
+ "folder": "Guile",
+ "fence": "scheme",
+ "ffi": "(system foreign), built into Guile",
+ "run": "guile --no-auto-compile -L . demo.scm",
+ "needs": "GNU Guile 3.0 and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "GNU Guile 3.0.9, Linux x86-64.",
+ "notes": [
+  "`peep-read` returns at most 4096 frames per call."
+ ],
+ "files": [
+  [
+   "peep.scm",
+   "the binding: module `(peep)`"
+  ],
+  [
+   "demo.scm",
+   "decodes the test files and prints checksums"
+  ]
+ ]
+}

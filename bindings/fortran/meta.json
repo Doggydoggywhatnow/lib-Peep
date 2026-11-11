@@ -1,0 +1,24 @@
+{
+ "name": "Fortran",
+ "fence": "fortran",
+ "ffi": "`iso_c_binding` with `bind(C)` interfaces (Fortran 2003)",
+ "run": "gfortran -O2 -o demo peep.f90 demo.f90 -L. -lpeep -Wl,-rpath,\"$PWD\" && ./demo",
+ "needs": "a Fortran 2008 compiler such as gfortran or ifx and nasm and ld (Linux x86-64) or as and ld (Linux ARM64)",
+ "status": "verified",
+ "verified_with": "gfortran 13, Linux x86-64.",
+ "notes": [
+  "Declare the player as `type(peep_t), target :: pe` (it holds pointers into itself, so do not copy it).",
+  "`peep_read` returns at most 4096 frames per call."
+ ],
+ "folder": "Fortran",
+ "files": [
+  [
+   "peep.f90",
+   "the binding: module `peep`"
+  ],
+  [
+   "demo.f90",
+   "demo: decodes the test files and prints checksums"
+  ]
+ ]
+}

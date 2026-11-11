@@ -1,0 +1,11 @@
+(require "peep.rkt" racket/file)
+
+(define pe (open-peep (file->bytes "song.flac")))       ; WAV or FLAC bytes
+(printf "~a ~a ~a\n" (peep-rate pe) (peep-channels pe) (peep-total pe))
+(let loop ([samples (peep-read pe 1024)])               ; list of interleaved stereo int16
+  (unless (null? samples)
+    (play samples)                                      ; your audio output
+    (loop (peep-read pe 1024))))
+(peep-seek! pe 44100)                                   ; jump to frame 44100
+(peep-set-gain! pe 128)                                 ; half volume
+(peep-close! pe)
