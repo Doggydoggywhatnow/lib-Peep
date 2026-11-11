@@ -66,6 +66,15 @@ All notable changes to Liberated Peep.
   slower, and wrong). None closes the gap and the cause of the loop's low instruction rate is still unknown; finding it needs hardware performance counters, which this VM does not provide.
 
 
+### Changed (dev branch): the ARM64 FLAC decoder gets the optimisations that carry over from x86-64
+- `arm64/flac.s`: (1) one Rice loop per predictor: fixed orders 1 to 4 each written out, LPC with 4, 8, 12 or 16 taps straight-line (the coefficients live in `v16` to `v18` and four scalar registers for the partition, so the loop loads only samples), and a NEON loop for 20 taps and up: ten loops chosen once per subframe
+  instead of a test per sample; (2) one unaligned 8-byte refill, inlined (it was a 4-byte call), with the invariant that the cache may hold genuine bits below its valid count, so a leading one at or past the valid count goes to the long-run path; (3) a 2-instruction zig-zag and no zero test in the fast path;
+  (4) `rd_signed`, one arithmetic shift of the cache per value, for verbatim, warm-up and escape data; (5) a NEON wasted-bits shift; (6) NEON interleaving of mono and of 3 to 8 channels (it was one scalar pass per channel).
+- Not ported: the PCLMULQDQ CRC-16 (ARM64 would need PMULL and a way to detect it without a system call), `lzcnt`/BMI2 (`clz` and variable shifts are already single instructions), and the x86-specific coefficient shuffle.
+- **Measured as instructions, not time**: dynamic instruction count per stereo frame (6-channel and mono: per frame of all channels) on 300 KB prefixes of the test files, QEMU single-step, before to after: level 0 89.4 to **68.9**, level 2 83.7 to **65.3**, level 5 121.3 to **82.9**, level 8 133.3 to **88.9**,
+  mono 82.3 to **56.9**, 5.1 194.9 to **126.0**, 24-bit 132.0 to **86.0** (22 to 35% fewer). Instruction counts are not speed (the x86 work showed that dependency chains, not counts, decide it), and QEMU timings mean nothing: **the ARM64 speed has not been measured**.
+- Checked: `make test-arm64` passes in full (100,000 fuzz inputs). Deliberately broken versions (refill byte count, fixed order 3 and LPC tap terms, the signed reader's shift, the long-run guard, mode selection, a coefficient register load, the interleave and wasted-bit counts) are all caught by the tests.
+
 ### Changed (dev branch): optimised x86-64 FLAC decoder, and two FLAC behaviour fixes in both ports
 - `flac.asm` is replaced by an optimised decoder written by another AI session from the previous `flac.asm`, then reviewed, built against this repo's `abi.inc`, and checked here: `make test` (200,000 fuzz inputs, audio suite, `make test-simd`) passes in full,
   and a callee-saved-register check over open, fill, fill32, seek, metadata and close on a 6-channel 24-bit file passes. Same exported symbols, same `peep` layout, same workspace size. What changed: one 8-byte refill (inlined in the Rice loops), `lzcnt` and `shrx`/`shlx`
